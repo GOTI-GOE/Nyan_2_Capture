@@ -10,17 +10,17 @@
 /* Layout: one narrow column of three steps (動画 → 候補 → 仕上げ); the editor canvas is the only large element. */
 :root{
   --bg:#fbf6f0; --surface:#ffffff; --ink:#2a2019; --mute:#7a695b; --line:#eadbcb;
-  --accent:#e0730f; --accent-ink:#ffffff; --accent-soft:#fbe4cc; --ok:#2f8a52; --bad:#c23b22;
+  --accent:#e0730f; --accent-ink:#ffffff; --accent-soft:#fbe4cc; --ok:#2f8a52; --bad:#c23b22; --male:#2360c4; --female:#d23f7a;
   --display:"Zen Maru Gothic","Hiragino Maru Gothic ProN","BIZ UDPGothic","Yu Gothic UI",sans-serif;
   --body:system-ui,-apple-system,"Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
   --radius:14px;
 }
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --bg:#17110c; --surface:#211912; --ink:#f4eae0; --mute:#a99583; --line:#3b2d21;
-  --accent:#f5953a; --accent-ink:#1c1108; --accent-soft:#3d2714; --ok:#5cc07e; --bad:#ef765f; color-scheme:dark } }
+  --accent:#f5953a; --accent-ink:#1c1108; --accent-soft:#3d2714; --ok:#5cc07e; --bad:#ef765f; --male:#6a9cf0; --female:#f07aa8; color-scheme:dark } }
 :root[data-theme="dark"]{
   --bg:#17110c; --surface:#211912; --ink:#f4eae0; --mute:#a99583; --line:#3b2d21;
-  --accent:#f5953a; --accent-ink:#1c1108; --accent-soft:#3d2714; --ok:#5cc07e; --bad:#ef765f; color-scheme:dark }
+  --accent:#f5953a; --accent-ink:#1c1108; --accent-soft:#3d2714; --ok:#5cc07e; --bad:#ef765f; --male:#6a9cf0; --female:#f07aa8; color-scheme:dark }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--body);padding-inline:16px;padding-block:0 48px}
@@ -64,6 +64,10 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .seg button{border:none;border-radius:0;min-height:36px;padding:6px 12px}
 .seg button.on{background:var(--accent-soft);color:var(--ink)}
+.seg.sex button{font-weight:700;min-width:84px}
+.seg.sex button.m{color:var(--male)}.seg.sex button.f{color:var(--female)}
+.seg.sex button.m.on{background:var(--male);color:#fff}.seg.sex button.f.on{background:var(--female);color:#fff}
+.chips button.m{border-color:var(--male);color:var(--male)}.chips button.f{border-color:var(--female);color:var(--female)}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chips button{min-height:30px;padding:3px 10px;border-radius:99px;font-size:13px}
 .switch{display:flex;align-items:center;gap:8px;font-weight:600}
@@ -115,7 +119,8 @@ video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-eve
     <div class="row">
       <button id="fPrev" title="1コマ戻る">◀ 1コマ</button>
       <button id="fNext" title="1コマ進む">1コマ ▶</button>
-      <button id="refit">顔に合わせる</button>
+      <button id="fitBody">全身</button>
+      <button id="fitFace">顔アップ</button>
     </div>
     <div class="muted tabular" id="resNote"></div>
     <label class="f"><span class="row" style="justify-content:space-between"><span>← 広く</span><span>寄る →</span></span><input type="range" id="zoom" min="0" max="1000" value="500" aria-label="切り抜きの大きさ"></label>
@@ -127,6 +132,7 @@ video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-eve
     <label class="switch"><input type="checkbox" id="nameOn">名前を入れる</label>
     <div id="nameBox" hidden style="display:flex;flex-direction:column;gap:8px">
       <input type="text" id="name" placeholder="例：マーマレード" maxlength="24" autocomplete="off">
+      <div class="row"><span class="muted">性別</span><div class="seg sex" id="sex" role="group" aria-label="性別"><button data-v="m" class="m" aria-pressed="false">♂ オス</button><button data-v="f" class="f" aria-pressed="false">♀ メス</button></div></div>
       <div class="chips" id="recent"></div>
       <div class="row"><span class="muted">文字の大きさ</span><div class="seg" id="size"><button data-v="s">小</button><button data-v="m" class="on">中</button><button data-v="l">大</button></div></div>
     </div>
@@ -148,7 +154,7 @@ const vid = $("vid");
 let cv = null, classifier = null, verifier = null, cvReady = null;
 let videoName = "", scanning = false, stopReq = false, samples = [];
 let src = document.createElement("canvas"), srcT = 0, face = null, crop = null;
-let savedCount = 0, sizeKey = "m", downloads;
+let savedCount = 0, sizeKey = "m", sex = "", body = null, downloads;
 
 /* ---------- OpenCV + 猫顔検出器 ---------- */
 cvReady = new Promise((resolve, reject) => {
@@ -198,6 +204,7 @@ async function openVideo(file) {
   stopReq = true;
   while (scanning) await sleep(30);
   videoName = file.name.replace(/\.[^.]+$/, "");
+  loadBody();
   $("stepPick").hidden = true; $("stepEdit").hidden = true; showVideoMsg("");
   if (vid.src) URL.revokeObjectURL(vid.src);
   vid.src = URL.createObjectURL(file);
@@ -300,21 +307,95 @@ function detectOn(canvas) {
   return best;
 }
 
-/* 切り抜きの初期枠：顔の約2.6倍の正方形、少し下寄せ（胸元まで入れる） */
-function cropFor(f, W, H) {
-  const side = Math.min(f.w * 2.6, W, H);
-  return clampCrop({ cx: f.x + f.w / 2, cy: f.y + f.h / 2 + f.w * 0.12, side }, W, H);
+/* 全身の範囲：体の枠（COCO-SSD）と顔を合わせた四角。体が取れない時は顔から推定（顔の約3.4×4.6倍、下向き） */
+function catBox(f, b) {
+  const u = b || { x: f.x + f.w / 2 - f.w * 1.7, y: f.y - f.h * 0.35, w: f.w * 3.4, h: f.h * 4.6 };
+  const x0 = Math.min(u.x, f.x), y0 = Math.min(u.y, f.y);
+  return { x: x0, y: y0, w: Math.max(u.x + u.w, f.x + f.w) - x0, h: Math.max(u.y + u.h, f.y + f.h) - y0 };
+}
+/* 全身が入る正方形。名前の帯（band＝高さの割合）がある時は、帯の上に全身が収まるようにする */
+function cropFor(f, W, H, b = null, band = 0) {
+  const u = catBox(f, b), m = 0.06 * Math.max(u.w, u.h);
+  const need = Math.max(u.w + 2 * m, (u.h + 2 * m) / (1 - band), f.w * 2.2);
+  const side = Math.min(need, W, H);
+  let cx = u.x + u.w / 2, cy = u.y + u.h / 2 + band * side / 2;
+  if ((u.h + 2 * m) / (1 - band) > side) cy = f.y - 0.12 * side + side / 2;   // 入り切らない時は顔を上寄りに
+  // 顔は必ず枠の中に
+  cx = Math.min(Math.max(cx, f.x + f.w - side / 2), f.x + side / 2);
+  cy = Math.min(Math.max(cy, f.y + f.h - side / 2), f.y + side / 2);
+  return clampCrop({ cx, cy, side }, W, H);
+}
+function faceCrop(f, W, H) {
+  return clampCrop({ cx: f.x + f.w / 2, cy: f.y + f.h / 2 + f.w * 0.12, side: Math.min(f.w * 2.6, W, H) }, W, H);
 }
 function clampCrop(c, W, H) {
   const side = Math.max(32, Math.min(c.side, W, H));
   return { side, cx: Math.min(Math.max(c.cx, side / 2), W - side / 2), cy: Math.min(Math.max(c.cy, side / 2), H - side / 2) };
 }
-/* 枠が画面からはみ出す割合（1 = 全部入る） */
-function fitRatio(f, W, H) {
+/* 全身のうち枠に入る割合（1 = 全部入る） */
+function fitRatio(f, W, H, b = null) {
+  const u = catBox(f, b), c = cropFor(f, W, H, b);
+  const ix = Math.max(0, Math.min(u.x + u.w, c.cx + c.side / 2) - Math.max(u.x, c.cx - c.side / 2));
+  const iy = Math.max(0, Math.min(u.y + u.h, c.cy + c.side / 2) - Math.max(u.y, c.cy - c.side / 2));
+  return Math.min(1, (ix * iy) / (u.w * u.h));
+}
+function thumbOf(canvas, c) {
+  const th = document.createElement("canvas");
+  th.width = th.height = 160;
+  th.getContext("2d").drawImage(canvas, c.cx - c.side / 2, c.cy - c.side / 2, c.side, c.side, 0, 0, 160, 160);
+  return th.toDataURL("image/jpeg", 0.75);
+}
+
+/* ---------- 猫の全身（COCO-SSD）。候補のコマと仕上げ画面だけで使う ---------- */
+const MODEL_URLS = ["ssd/model.json", "https://storage.googleapis.com/tfjs-models/savedmodel/ssdlite_mobilenet_v2/model.json"];
+let bodyModel = null, bodyReady = null;
+function loadScript(url) {
+  return new Promise((res, rej) => { const el = document.createElement("script"); el.src = url; el.onload = res; el.onerror = () => rej(new Error(url)); document.head.appendChild(el); });
+}
+function loadBody() {
+  if (!bodyReady) bodyReady = (async () => {
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");
+    for (const modelUrl of MODEL_URLS) {
+      try { bodyModel = await cocoSsd.load({ base: "lite_mobilenet_v2", modelUrl }); return true; }
+      catch (e) { console.warn("全身モデルを読めません", modelUrl, e); }
+    }
+    return false;
+  })().catch(e => { console.warn(e); return false; });
+  return bodyReady;
+}
+/* 体が動画の端で切れている辺1つにつき減点 */
+function edgeCut(b, W, H) {
+  const e = 0.01 * Math.max(W, H);
+  const n = (b.x < e) + (b.y < e) + (b.x + b.w > W - e) + (b.y + b.h > H - e);
+  return Math.pow(0.85, n);
+}
+/* 顔のまわりが画面の端で切れていないか（顔の2.6倍の枠が画面に入る割合の2乗） */
+function faceFit(f, W, H) {
   const s = f.w * 2.6, cx = f.x + f.w / 2, cy = f.y + f.h / 2 + f.w * 0.12;
   const ix = Math.max(0, Math.min(W, cx + s / 2) - Math.max(0, cx - s / 2));
   const iy = Math.max(0, Math.min(H, cy + s / 2) - Math.max(0, cy - s / 2));
-  return Math.min(1, (ix * iy) / (s * s));
+  return Math.pow(Math.min(1, (ix * iy) / (s * s)), 2);
+}
+/* 顔と体の位置関係のもっともらしさ。縦長の体の下の方にある「顔」はお尻や手の見まちがいが多い */
+function plausible(f, b) {
+  const fy = (f.y + f.h / 2 - b.y) / b.h;
+  return b.h > b.w * 1.2 && fy > 0.6 ? 0.25 : 1;
+}
+/* 顔を含む猫の枠（無ければ null） */
+async function findBody(canvas, f) {
+  if (!bodyModel || !f) return null;
+  const preds = await bodyModel.detect(canvas, 10, 0.25);
+  const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
+  let best = null;
+  for (const p of preds) {
+    if (!["cat", "dog", "teddy bear"].includes(p.class)) continue;
+    const [x, y, w, h] = p.bbox, tol = f.w * 0.3;
+    if (cx < x - tol || cx > x + w + tol || cy < y - tol || cy > y + h + tol) continue;
+    const sc = p.score * (p.class === "cat" ? 1 : 0.7);
+    if (!best || sc > best.sc) best = { x, y, w, h, sc };
+  }
+  return best;
 }
 
 /* 1コマ分を調べて記録 */
@@ -322,10 +403,7 @@ function sampleFrame(t) {
   detCtx.drawImage(vid, 0, 0, det.width, det.height);
   const f = detectOn(det);
   if (!f) return false;
-  const c = cropFor(f, det.width, det.height), th = document.createElement("canvas");
-  th.width = th.height = 160;
-  th.getContext("2d").drawImage(det, c.cx - c.side / 2, c.cy - c.side / 2, c.side, c.side, 0, 0, 160, 160);
-  samples.push({ t, f, size: f.w / Math.min(det.width, det.height), fit: fitRatio(f, det.width, det.height), thumb: th.toDataURL("image/jpeg", 0.75) });
+  samples.push({ t, f, size: f.w / Math.min(det.width, det.height), fit: fitRatio(f, det.width, det.height), thumb: thumbOf(det, cropFor(f, det.width, det.height)) });
   return true;
 }
 
@@ -389,27 +467,53 @@ async function scan() {
   $("scanBar").style.width = "100%";
   $("scanLabel").textContent = stopReq ? "途中まで調べました" : "調べ終わりました";
   $("stopScan").disabled = true;
+  const pool = rank(samples, dur, 30);
+  if (pool.length && !stopReq) await refineBodies(pool);
   scanning = false;
-  showPick(rank(samples, dur));
+  showPick(finish(pool));
+}
+/* 上位のコマだけ全身の枠を取り、全身が枠に収まるかで点数を付け直す */
+async function refineBodies(pool) {
+  $("scanLabel").textContent = "全身の位置を調べています…";
+  const ok = await Promise.race([loadBody(), sleep(25000).then(() => false)]);
+  if (!ok) { $("scanLabel").textContent = "全身の検出が使えないため、顔から全身の位置を推定しました"; return; }
+  let i = 0;
+  for (const s of pool) {
+    if (stopReq) break;
+    await seek(s.t);
+    detCtx.drawImage(vid, 0, 0, det.width, det.height);
+    s.body = await findBody(det, s.f);
+    s.fit = fitRatio(s.f, det.width, det.height, s.body);
+    s.thumb = thumbOf(det, cropFor(s.f, det.width, det.height, s.body));
+    s.score = s.base * (0.6 + 0.4 * s.fit) * (s.body ? plausible(s.f, s.body) * edgeCut(s.body, det.width, det.height) : 0.8);
+    $("scanBar").style.width = (100 * ++i / pool.length).toFixed(0) + "%";
+  }
+  $("scanLabel").textContent = "調べ終わりました";
 }
 $("stopScan").onclick = () => { stopReq = true; };
 
-/* 点数 = 大きさ × シャープさ × 検出の確かさ（2つの検出器の反応数）× 枠の収まり。近い時刻は1つにまとめる */
-function rank(list, dur) {
+/* 点数 = 顔の大きさ × シャープさ × 検出の確かさ（2つの検出器の反応数）× 顔まわりの収まり × 全身が正方形に入るか（弱め）。
+   上位30コマは全身の枠を取り、体が動画の端で切れている・顔の位置がおかしい時に減点。近い時刻は1つにまとめる */
+function rank(list, dur, limit = TOP_K) {
   if (!list.length) return [];
   const sharps = list.map(s => s.f.sharp).sort((a, b) => a - b);
   const ref = sharps[Math.floor(sharps.length * 0.9)] || 1;
   for (const s of list) {
     const size = Math.pow(Math.min(1, s.size / 0.35), 0.7);
     const sharp = Math.min(1, s.f.sharp / ref);
-    s.score = size * (0.3 + 0.7 * sharp) * s.f.conf * Math.pow(s.fit, 2);
+    s.base = size * (0.3 + 0.7 * sharp) * s.f.conf;
+    s.score = s.base * (0.6 + 0.4 * s.fit) * faceFit(s.f, det.width, det.height);
   }
   const gap = Math.max(1, dur / 40), picked = [];
   for (const s of [...list].sort((a, b) => b.score - a.score)) {
     if (picked.every(p => Math.abs(p.t - s.t) >= gap)) picked.push(s);
-    if (picked.length >= TOP_K) break;
+    if (picked.length >= limit) break;
   }
-  const top = picked[0].score || 1;
+  return picked;
+}
+function finish(pool) {
+  const picked = [...pool].sort((a, b) => b.score - a.score).slice(0, TOP_K);
+  const top = (picked[0] && picked[0].score) || 1;
   picked.forEach(p => { p.pts = Math.round(100 * p.score / top); });
   return picked;
 }
@@ -455,21 +559,24 @@ async function grabFrame(t) {
   undoStack.length = 0; $("undo").disabled = true;
   $("editT").textContent = srcT.toFixed(2) + " 秒";
 }
-function findFace() {
-  if (!classifier) return null;
-  const k = Math.min(1, DET_LONG / Math.max(src.width, src.height));
+/* 仕上げ用のコマで顔と全身を取り直す（元画像の座標で face / body に入れる） */
+async function findCat() {
+  if (!classifier) { face = body = null; return; }
+  const k = Math.min(1, DET_LONG / Math.max(src.width, src.height)), sc = r => r && { x: r.x / k, y: r.y / k, w: r.w / k, h: r.h / k };
   det.width = Math.round(src.width * k); det.height = Math.round(src.height * k);
   detCtx.drawImage(src, 0, 0, det.width, det.height);
   const f = detectOn(det);
-  return f && { x: f.x / k, y: f.y / k, w: f.w / k, h: f.h / k };
+  face = sc(f);
+  body = f ? sc(await findBody(det, f)) : null;
 }
+const bandNow = () => $("nameOn").checked ? BAND[sizeKey] : 0;
 function defaultCrop() {
   const W = src.width, H = src.height;
-  return face ? cropFor(face, W, H) : clampCrop({ cx: W / 2, cy: H / 2, side: Math.min(W, H) * 0.7 }, W, H);
+  return face ? cropFor(face, W, H, body, bandNow()) : clampCrop({ cx: W / 2, cy: H / 2, side: Math.min(W, H) * 0.9 }, W, H);
 }
 async function openEditor(t) {
   await grabFrame(t);
-  face = findFace();
+  await findCat();
   crop = defaultCrop();
   $("stepEdit").hidden = false;
   syncZoom(); draw();
@@ -482,11 +589,18 @@ async function stepFrame(d) {
 }
 $("fPrev").onclick = () => stepFrame(-FRAME);
 $("fNext").onclick = () => stepFrame(FRAME);
-$("refit").onclick = () => { face = findFace() || face; crop = defaultCrop(); syncZoom(); draw(); };
+$("fitBody").onclick = async () => { const f = face, b = body; await findCat(); face = face || f; body = body || b; crop = defaultCrop(); syncZoom(); draw(); };
+$("fitFace").onclick = async () => { if (!face) await findCat(); if (!face) { toast("顔が見つかりません。枠を手で動かしてください"); return; } crop = faceCrop(face, src.width, src.height); syncZoom(); draw(); };
 $("back").onclick = () => $("stepPick").scrollIntoView({ block: "start" });
 
 const out = $("out"), octx = out.getContext("2d");
 const BAND = { s: 0.14, m: 0.18, l: 0.22 };
+/* 性別ごとの帯：♂＝青、♀＝ピンク（色と記号の両方で見分けられるように） */
+const SEX = {
+  "": { band: "rgba(0,0,0,0.45)", line: "rgba(255,255,255,0.35)", sym: "", word: "" },
+  m: { band: "rgba(28,86,186,0.66)", line: "#7fb2ff", sym: "♂", word: "オス" },
+  f: { band: "rgba(210,58,120,0.66)", line: "#ffa6c9", sym: "♀", word: "メス" },
+};
 function draw() {
   if (!crop) return;
   const px = Math.round(crop.side), up = OUT / px;
@@ -495,16 +609,19 @@ function draw() {
   octx.drawImage(src, crop.cx - crop.side / 2, crop.cy - crop.side / 2, crop.side, crop.side, 0, 0, OUT, OUT);
   const name = $("name").value.trim();
   if ($("nameOn").checked && name) {
-    const bh = Math.round(OUT * BAND[sizeKey]);
-    octx.fillStyle = "rgba(0,0,0,0.45)";
+    const bh = Math.round(OUT * BAND[sizeKey]), st = SEX[sex] || SEX[""];
+    octx.fillStyle = st.band;
     octx.fillRect(0, OUT - bh, OUT, bh);
+    octx.fillStyle = st.line;   // 帯の上端に細い線（性別の色をはっきりさせる）
+    octx.fillRect(0, OUT - bh, OUT, Math.max(4, Math.round(bh * 0.05)));
+    const text = st.sym ? `${st.sym} ${name}` : name;
     let fs = Math.round(bh * 0.62);
     const font = s => `700 ${s}px "Zen Maru Gothic","Hiragino Maru Gothic ProN","BIZ UDPGothic","Yu Gothic",sans-serif`;
     octx.font = font(fs);
-    while (fs > 20 && octx.measureText(name).width > OUT * 0.9) { fs -= 2; octx.font = font(fs); }
+    while (fs > 20 && octx.measureText(text).width > OUT * 0.9) { fs -= 2; octx.font = font(fs); }
     octx.fillStyle = "#fff"; octx.textAlign = "center"; octx.textBaseline = "middle";
     octx.shadowColor = "rgba(0,0,0,0.35)"; octx.shadowBlur = 6;
-    octx.fillText(name, OUT / 2, OUT - bh / 2 + fs * 0.04);
+    octx.fillText(text, OUT / 2, OUT - bh / 2 + fs * 0.04);
     octx.shadowBlur = 0; octx.shadowColor = "transparent";
   }
   drawBrushOverlay();
@@ -622,12 +739,31 @@ $("brush").addEventListener("input", draw);
 out.addEventListener("wheel", e => { e.preventDefault(); setSide(crop.side * Math.exp(e.deltaY * 0.0015)); syncZoom(); }, { passive: false });
 
 /* 名前 */
-function loadRecent() { try { return JSON.parse(localStorage.getItem("neko.recent") || "[]"); } catch { return []; } }
-function saveRecent(n) { const r = [n, ...loadRecent().filter(x => x !== n)].slice(0, 8); try { localStorage.setItem("neko.recent", JSON.stringify(r)); } catch {} renderRecent(); }
+/* 最近の名前（性別もいっしょに覚える） */
+function loadRecent() {
+  try { return JSON.parse(localStorage.getItem("neko.recent") || "[]").map(x => typeof x === "string" ? { n: x, s: "" } : x); } catch { return []; }
+}
+function saveRecent(n, sx) {
+  const r = [{ n, s: sx }, ...loadRecent().filter(x => x.n !== n)].slice(0, 8);
+  try { localStorage.setItem("neko.recent", JSON.stringify(r)); } catch {}
+  renderRecent();
+}
 function renderRecent() {
   const box = $("recent"); box.innerHTML = "";
-  for (const n of loadRecent()) { const b = document.createElement("button"); b.textContent = n; b.onclick = () => { $("name").value = n; draw(); }; box.appendChild(b); }
+  for (const r of loadRecent()) {
+    const b = document.createElement("button");
+    b.textContent = (SEX[r.s] && SEX[r.s].sym ? SEX[r.s].sym + " " : "") + r.n;
+    if (r.s) b.className = r.s;
+    b.onclick = () => { $("name").value = r.n; setSex(r.s || ""); };
+    box.appendChild(b);
+  }
 }
+function setSex(v) {
+  sex = v;
+  $("sex").querySelectorAll("button").forEach(x => { x.classList.toggle("on", x.dataset.v === v); x.setAttribute("aria-pressed", x.dataset.v === v); });
+  draw();
+}
+$("sex").addEventListener("click", e => { const b = e.target.closest("button"); if (b) setSex(sex === b.dataset.v ? "" : b.dataset.v); });
 renderRecent();
 $("nameOn").addEventListener("change", () => { $("nameBox").hidden = !$("nameOn").checked; draw(); if ($("nameOn").checked) $("name").focus(); });
 $("name").addEventListener("input", draw);
@@ -635,16 +771,17 @@ $("size").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
   sizeKey = b.dataset.v; $("size").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); draw();
 });
-if (document.fonts) document.fonts.load('700 80px "Zen Maru Gothic"', "猫ねこネコマーマレード").then(draw).catch(() => {});
+if (document.fonts) document.fonts.load('700 80px "Zen Maru Gothic"', "猫ねこネコマーマレード♂♀").then(draw).catch(() => {});
 
 /* 保存 */
 function toast(text) { const t = document.createElement("div"); t.className = "toast"; t.textContent = text; document.body.appendChild(t); setTimeout(() => t.remove(), 2200); }
 $("save").onclick = async () => {
   const keep = mode; mode = "move"; draw();   // 筆のカーソルを写さない
   const name = $("nameOn").checked ? $("name").value.trim() : "";
-  if (name) saveRecent(name);
+  if (name) saveRecent(name, sex);
   const safe = s => s.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40);
-  const filename = `${safe(name || "neko")}_${safe(videoName)}_${srcT.toFixed(2)}s.jpg`;
+  const tag = name && SEX[sex].word ? "_" + SEX[sex].word : "";
+  const filename = `${safe(name || "neko")}${tag}_${safe(videoName)}_${srcT.toFixed(2)}s.jpg`;
   const blob = await new Promise(r => out.toBlob(r, "image/jpeg", 0.9));
   mode = keep; draw();
   try {
