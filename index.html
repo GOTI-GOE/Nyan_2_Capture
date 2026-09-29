@@ -72,6 +72,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .chips button{min-height:30px;padding:3px 10px;border-radius:99px;font-size:13px}
 .switch{display:flex;align-items:center;gap:8px;font-weight:600}
 .switch input{width:20px;height:20px;accent-color:var(--accent)}
+.switch.mini{font-weight:500;font-size:13px;color:var(--mute)}
+.switch.mini input{width:16px;height:16px}
 .msg{border-radius:10px;padding:10px 12px;font-size:14px;background:var(--accent-soft)}
 .msg.bad{background:color-mix(in srgb,var(--bad) 14%,var(--surface));border:1px solid var(--bad)}
 .msg ul{margin:6px 0 0;padding-left:20px}
@@ -115,6 +117,11 @@ video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-eve
 
   <section class="card" id="stepEdit" hidden>
     <div class="step"><i>3</i>仕上げ <span class="muted tabular" id="editT"></span></div>
+    <div class="row">
+      <div class="seg" id="ver" role="group" aria-label="レタッチ"><button data-v="orig" class="on" aria-pressed="true">無修正</button><button data-v="auto" disabled aria-pressed="false">自動修正</button></div>
+      <label class="switch mini"><input type="checkbox" id="marks" checked>直した所に印</label>
+    </div>
+    <div class="muted" id="autoNote" aria-live="polite"></div>
     <div class="stage" id="stage"><canvas id="out" width="800" height="800"></canvas><span class="hint" id="hint">ドラッグで移動・ピンチで拡大</span></div>
     <div class="row">
       <button id="fPrev" title="1コマ戻る">◀ 1コマ</button>
@@ -154,6 +161,8 @@ const vid = $("vid");
 let cv = null, classifier = null, verifier = null, cvReady = null;
 let videoName = "", scanning = false, stopReq = false, samples = [];
 let src = document.createElement("canvas"), srcT = 0, face = null, crop = null;
+const srcOrig = src;                 // 無修正のコマ
+let srcAuto = null, autoSpots = [], autoToken = 0, saving = false;   // 自動修正版と直した所
 let savedCount = 0, sizeKey = "m", sex = "", body = null, downloads;
 
 /* ---------- OpenCV + 猫顔検出器 ---------- */
@@ -554,9 +563,10 @@ $("useScrub").onclick = () => openEditor($("scrub").value / 1000 * vid.duration,
 async function grabFrame(t) {
   await seek(t);
   srcT = vid.currentTime;
-  src.width = vid.videoWidth; src.height = vid.videoHeight;
-  src.getContext("2d", { willReadFrequently: true }).drawImage(vid, 0, 0);
-  undoStack.length = 0; $("undo").disabled = true;
+  srcOrig.width = vid.videoWidth; srcOrig.height = vid.videoHeight;
+  srcOrig.getContext("2d", { willReadFrequently: true }).drawImage(vid, 0, 0);
+  autoToken++; srcAuto = null; autoSpots = [];
+  setVer("orig");
   $("editT").textContent = srcT.toFixed(2) + " 秒";
 }
 /* 仕上げ用のコマで顔と全身を取り直す（元画像の座標で face / body に入れる） */
@@ -581,17 +591,196 @@ async function openEditor(t) {
   $("stepEdit").hidden = false;
   syncZoom(); draw();
   $("stepEdit").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  runAuto();
 }
 async function stepFrame(d) {
   if (undoStack.length) toast("コマを送ったので、消した跡はリセットされました");
   await grabFrame(srcT + d);
+  const f = face, b = body;
+  await findCat(); face = face || f; body = body || b;
   draw();
+  runAuto();
 }
 $("fPrev").onclick = () => stepFrame(-FRAME);
 $("fNext").onclick = () => stepFrame(FRAME);
 $("fitBody").onclick = async () => { const f = face, b = body; await findCat(); face = face || f; body = body || b; crop = defaultCrop(); syncZoom(); draw(); };
 $("fitFace").onclick = async () => { if (!face) await findCat(); if (!face) { toast("顔が見つかりません。枠を手で動かしてください"); return; } crop = faceCrop(face, src.width, src.height); syncZoom(); draw(); };
 $("back").onclick = () => $("stepPick").scrollIntoView({ block: "start" });
+
+/* ---------- 自動レタッチ（猫のうしろの服・ソファ・床などのシミ） ----------
+   1) 猫のまわりの輪から「面」（服など）の色を取る
+   2) 周り（メディアンぼかし）との色の差が大きい小さな斑点を探す
+   3) 面に囲まれていて、猫・手・顔に触れない斑点だけを inpaint で埋める
+   しわ（明るさだけ違う・細長い）や柄は残るように、色の差・形・大きさで絞る */
+function medianOf(arr) {
+  const step = Math.max(1, Math.floor(arr.length / 20000)), n = Math.ceil(arr.length / step), t = new Float32Array(n);
+  for (let i = 0, j = 0; i < arr.length; i += step) t[j++] = arr[i];
+  t.sort(); return t[n >> 1];
+}
+/* 調整値：thrK＝ばらつきの何倍から候補か、strength＝斑点の平均の色の差の下限、protect＝猫・手のまわりの守る幅(px) */
+const AUTO = { thrK: 6, minThr: 12, strength: 0, peak: 0, chroma: 10, protect: 11, medK: 0.07 };
+function autoRetouch(srcC, f, b, dbg = null) {
+  const k = Math.min(1, 640 / Math.max(srcC.width, srcC.height));
+  const W = Math.round(srcC.width * k), H = Math.round(srcC.height * k), A = W * H;
+  const wc = document.createElement("canvas"); wc.width = W; wc.height = H;
+  wc.getContext("2d").drawImage(srcC, 0, 0, W, H);
+  const mats = [];
+  const M = () => { const m = new cv.Mat(); mats.push(m); return m; };
+  try {
+    const rgba = cv.imread(wc); mats.push(rgba);
+    const rgb = M(), lab = M(), med = M(), mlab = M();
+    cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
+    cv.medianBlur(rgb, med, Math.round(Math.min(W, H) * AUTO.medK) | 1);
+    cv.cvtColor(med, mlab, cv.COLOR_RGB2Lab);
+    const Lb = lab.data, Mb = mlab.data;
+    const sc = r => r && { x: r.x * k, y: r.y * k, w: r.w * k, h: r.h * k };
+    const fs = sc(f), cb = catBox(fs, sc(b));
+    const x0 = Math.max(0, Math.floor(cb.x)), y0 = Math.max(0, Math.floor(cb.y));
+    const x1 = Math.min(W, Math.ceil(cb.x + cb.w)), y1 = Math.min(H, Math.ceil(cb.y + cb.h));
+    const inCat = (x, y) => x >= x0 && x < x1 && y >= y0 && y < y1;
+    // 1) 面の色
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, hw = (x1 - x0) * 0.75, hh = (y1 - y0) * 0.75;
+    let ring = [];
+    for (let y = Math.max(0, Math.floor(cy - hh)); y < Math.min(H, cy + hh); y++)
+      for (let x = Math.max(0, Math.floor(cx - hw)); x < Math.min(W, cx + hw); x++) if (!inCat(x, y)) ring.push(y * W + x);
+    if (ring.length < 500) { ring = []; for (let i = 0; i < A; i++) if (!inCat(i % W, (i / W) | 0)) ring.push(i); }
+    if (ring.length < 500) return { skip: "surface" };
+    const ch = c => medianOf(Float32Array.from(ring, i => Lb[i * 3 + c]));
+    const mL = ch(0), mA = ch(1), mB = ch(2);
+    const dist = new Float32Array(A);
+    for (let i = 0; i < A; i++) {
+      const dl = (Lb[i * 3] - mL) * 0.35, da = Lb[i * 3 + 1] - mA, db = Lb[i * 3 + 2] - mB;
+      dist[i] = Math.sqrt(dl * dl + da * da + db * db);
+    }
+    const dr = Float32Array.from(ring, i => dist[i]), dm = medianOf(dr);
+    const tc = Math.min(22, dm + 2.5 * medianOf(dr.map(v => Math.abs(v - dm))) + 8);
+    const surface = new Uint8Array(A);
+    let inRing = 0;
+    for (let i = 0; i < A; i++) surface[i] = dist[i] < tc ? 1 : 0;
+    for (const i of ring) inRing += surface[i];
+    if (inRing / ring.length < 0.35) return { skip: "surface" };
+    // 2) 局所の色の差
+    const diff = new Float32Array(A), onSurf = [];
+    for (let i = 0; i < A; i++) {
+      const d0 = Lb[i * 3] - Mb[i * 3], d1 = Lb[i * 3 + 1] - Mb[i * 3 + 1], d2 = Lb[i * 3 + 2] - Mb[i * 3 + 2];
+      diff[i] = Math.sqrt(0.6 * d0 * d0 + 1.5 * d1 * d1 + 1.5 * d2 * d2);
+      if (surface[i]) onSurf.push(diff[i]);
+    }
+    const sd = Float32Array.from(onSurf), m0 = medianOf(sd), thr = Math.max(AUTO.minThr, m0 + AUTO.thrK * medianOf(sd.map(v => Math.abs(v - m0))));
+    const cand = new cv.Mat(H, W, cv.CV_8UC1); mats.push(cand);
+    for (let i = 0; i < A; i++) cand.data[i] = diff[i] > thr ? 255 : 0;
+    const k3 = cv.Mat.ones(3, 3, cv.CV_8U), k5 = cv.Mat.ones(5, 5, cv.CV_8U), k7 = cv.Mat.ones(AUTO.protect, AUTO.protect, cv.CV_8U); mats.push(k3, k5, k7);
+    cv.morphologyEx(cand, cand, cv.MORPH_CLOSE, k3);
+    // 守る所：猫の枠の中で面の色でない大きなかたまり（猫・手）
+    const prot = new cv.Mat(H, W, cv.CV_8UC1, new cv.Scalar(0)); mats.push(prot);
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) prot.data[y * W + x] = surface[y * W + x] ? 0 : 255;
+    cv.morphologyEx(prot, prot, cv.MORPH_OPEN, k5);
+    const pl = M(), ps = M(), pc = M();
+    const np = cv.connectedComponentsWithStats(prot, pl, ps, pc);
+    const bigP = new Uint8Array(np);
+    for (let i = 1; i < np; i++) bigP[i] = ps.data32S[i * 5 + 4] > A * 0.003 ? 1 : 0;
+    for (let i = 0; i < A; i++) prot.data[i] = bigP[pl.data32S[i]] ? 255 : 0;
+    cv.dilate(prot, prot, k7);
+    if (dbg) dbg.meta = { k, W, thr, tc, diff, surface, prot: Uint8Array.from(prot.data), cand: Uint8Array.from(cand.data) };
+    for (let i = 0; i < A; i++) if (prot.data[i]) cand.data[i] = 0;
+    // 3) 面に囲まれた小さな斑点
+    const lb = M(), st = M(), ce = M();
+    const n = cv.connectedComponentsWithStats(cand, lb, st, ce);
+    const L32 = lb.data32S, keep = new cv.Mat(H, W, cv.CV_8UC1, new cv.Scalar(0)); mats.push(keep);
+    const spots = [];
+    for (let i = 1; i < n; i++) {
+      const bx = st.data32S[i * 5], by = st.data32S[i * 5 + 1], bw = st.data32S[i * 5 + 2], bh = st.data32S[i * 5 + 3], ar = st.data32S[i * 5 + 4];
+      const why = r => { if (dbg) dbg.push({ x: (bx + bw / 2) / k, y: (by + bh / 2) / k, r, ar }); };
+      if (ar < A * 0.00002 || ar > A * 0.003) { why("size"); continue; }
+      if (Math.max(bw, bh) / Math.max(1, Math.min(bw, bh)) > 3.2 || ar / (bw * bh) < 0.3) { why("shape"); continue; }
+      const ccx = bx + bw / 2, ccy = by + bh / 2;
+      if (ccx > fs.x - fs.w * 0.3 && ccx < fs.x + fs.w * 1.3 && ccy > fs.y - fs.h * 0.3 && ccy < fs.y + fs.h * 1.3) { why("face"); continue; }
+      // はっきりした斑点だけ（生地の凹凸やJPEGのむらは弱い）
+      // 色みの差（明るさは除く）：しわ・生地の凹凸・圧縮のむらは主に明るさ、シミは色みが変わる
+      let sum = 0, peak = 0, csum = 0;
+      for (let y = by; y < by + bh; y++) for (let x = bx; x < bx + bw; x++) {
+        const q = y * W + x;
+        if (L32[q] !== i) continue;
+        sum += diff[q]; peak = Math.max(peak, diff[q]);
+        csum += Math.hypot(Lb[q * 3 + 1] - Mb[q * 3 + 1], Lb[q * 3 + 2] - Mb[q * 3 + 2]);
+      }
+      if (sum / ar < AUTO.strength || peak < AUTO.peak || csum / ar < AUTO.chroma) { why("weak " + (sum / ar).toFixed(0) + "/" + (csum / ar).toFixed(0)); continue; }
+      // 斑点のまわり3pxの輪のうち、面の色が8割以上なら「面に囲まれている」
+      let rn = 0, rs = 0;
+      for (let y = Math.max(0, by - 3); y < Math.min(H, by + bh + 3); y++)
+        for (let x = Math.max(0, bx - 3); x < Math.min(W, bx + bw + 3); x++) {
+          const idx = y * W + x;
+          if (L32[idx] === i) continue;
+          let near = false;
+          for (let dy = -3; dy <= 3 && !near; dy++) for (let dx = -3; dx <= 3; dx++) {
+            const yy = y + dy, xx = x + dx;
+            if (yy >= 0 && yy < H && xx >= 0 && xx < W && L32[yy * W + xx] === i) { near = true; break; }
+          }
+          if (near) { rn++; rs += surface[idx]; }
+        }
+      if (!rn || rs / rn < 0.8) { why("enclose " + (rn ? rs / rn : 0).toFixed(2)); continue; }
+      for (let y = by; y < by + bh; y++) for (let x = bx; x < bx + bw; x++) if (L32[y * W + x] === i) keep.data[y * W + x] = 255;
+      spots.push({ x: bx / k, y: by / k, w: bw / k, h: bh / k });
+    }
+    if (!spots.length) return { spots };
+    cv.dilate(keep, keep, k5);
+    // 元の大きさで埋める
+    const full = cv.imread(srcC), fRgb = M(), fMask = M(), fOut = M(), fRgba = M(); mats.push(full);
+    cv.cvtColor(full, fRgb, cv.COLOR_RGBA2RGB);
+    cv.resize(keep, fMask, new cv.Size(srcC.width, srcC.height), 0, 0, cv.INTER_NEAREST);
+    cv.inpaint(fRgb, fMask, fOut, Math.max(3, 5 / k), cv.INPAINT_TELEA);
+    cv.cvtColor(fOut, fRgba, cv.COLOR_RGB2RGBA);
+    const oc = document.createElement("canvas"); oc.width = srcC.width; oc.height = srcC.height;
+    oc.getContext("2d", { willReadFrequently: true }).putImageData(new ImageData(new Uint8ClampedArray(fRgba.data), oc.width, oc.height), 0, 0);
+    return { canvas: oc, spots };
+  } finally { mats.forEach(m => { try { m.delete(); } catch {} }); }
+}
+async function runAuto() {
+  const token = ++autoToken;
+  const btn = $("ver").querySelector('[data-v="auto"]');
+  btn.disabled = true; btn.textContent = "自動修正";
+  $("autoNote").textContent = "シミを探しています…";
+  await sleep(40);   // 先に画面を描かせる
+  if (token !== autoToken) return;
+  if (!cv || !face) { $("autoNote").textContent = "猫の顔が見つからないので、自動修正はしていません（指で消せます）"; return; }
+  let r;
+  const t0 = performance.now();
+  try { r = autoRetouch(srcOrig, face, body); } catch (e) { console.warn(e); r = { error: true }; }
+  if (token !== autoToken) return;
+  const ms = Math.round(performance.now() - t0);
+  if (r.error) { $("autoNote").textContent = "自動修正でエラーが起きました（指で消せます）"; return; }
+  if (r.skip) { $("autoNote").textContent = "猫のうしろに無地の服や床が見つからないので、自動修正はしていません"; return; }
+  if (!r.spots.length) { $("autoNote").textContent = "シミは見つかりませんでした"; return; }
+  srcAuto = r.canvas; autoSpots = r.spots;
+  btn.disabled = false; btn.textContent = `自動修正（${r.spots.length}か所）`;
+  $("autoNote").textContent = `${r.spots.length}か所を直しました（${(ms / 1000).toFixed(1)}秒）。「無修正」を押すと見比べられます`;
+  setVer("auto");
+}
+function setVer(v) {
+  if (v === "auto" && !srcAuto) v = "orig";
+  src = v === "auto" ? srcAuto : srcOrig;
+  $("ver").querySelectorAll("button").forEach(x => { x.classList.toggle("on", x.dataset.v === v); x.setAttribute("aria-pressed", x.dataset.v === v); });
+  $("marks").parentElement.hidden = v !== "auto";
+  undoStack.length = 0; $("undo").disabled = true;
+  draw();
+}
+$("ver").addEventListener("click", e => { const b = e.target.closest("button"); if (b && !b.disabled) setVer(b.dataset.v); });
+$("marks").addEventListener("change", () => draw());
+/* 直した所に黄色の点線の丸（保存する画像には入れない） */
+function drawMarks() {
+  if (saving || src !== srcAuto || !$("marks").checked || !crop) return;
+  const ox = crop.cx - crop.side / 2, oy = crop.cy - crop.side / 2, k = OUT / crop.side;
+  octx.save();
+  octx.setLineDash([8, 6]); octx.lineWidth = 3; octx.strokeStyle = "#ffd23f";
+  octx.shadowColor = "rgba(0,0,0,0.6)"; octx.shadowBlur = 3;
+  for (const sp of autoSpots) {
+    const x = (sp.x + sp.w / 2 - ox) * k, y = (sp.y + sp.h / 2 - oy) * k, r = Math.max(sp.w, sp.h) / 2 * k + 10;
+    if (x < -r || y < -r || x > OUT + r || y > OUT + r) continue;
+    octx.beginPath(); octx.arc(x, y, r, 0, Math.PI * 2); octx.stroke();
+  }
+  octx.restore();
+}
 
 const out = $("out"), octx = out.getContext("2d");
 const BAND = { s: 0.14, m: 0.18, l: 0.22 };
@@ -624,6 +813,7 @@ function draw() {
     octx.fillText(text, OUT / 2, OUT - bh / 2 + fs * 0.04);
     octx.shadowBlur = 0; octx.shadowColor = "transparent";
   }
+  drawMarks();
   drawBrushOverlay();
 }
 
@@ -776,14 +966,14 @@ if (document.fonts) document.fonts.load('700 80px "Zen Maru Gothic"', "猫ねこ
 /* 保存 */
 function toast(text) { const t = document.createElement("div"); t.className = "toast"; t.textContent = text; document.body.appendChild(t); setTimeout(() => t.remove(), 2200); }
 $("save").onclick = async () => {
-  const keep = mode; mode = "move"; draw();   // 筆のカーソルを写さない
+  const keep = mode; mode = "move"; saving = true; draw();   // 筆のカーソルと印を写さない
   const name = $("nameOn").checked ? $("name").value.trim() : "";
   if (name) saveRecent(name, sex);
   const safe = s => s.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40);
   const tag = name && SEX[sex].word ? "_" + SEX[sex].word : "";
   const filename = `${safe(name || "neko")}${tag}_${safe(videoName)}_${srcT.toFixed(2)}s.jpg`;
   const blob = await new Promise(r => out.toBlob(r, "image/jpeg", 0.9));
-  mode = keep; draw();
+  mode = keep; saving = false; draw();
   try {
     if (downloads) await downloads.save({ filename, data: blob });
     else {
