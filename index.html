@@ -84,7 +84,7 @@ video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-eve
 </style>
 
 <div class="wrap">
-  <header><h1>ねこ顔<b>きりぬき</b></h1><small class="tabular">版 2026-09-30</small><small id="cvState">検出の準備中…</small></header>
+  <header><h1>ねこ顔<b>きりぬき</b></h1><small class="tabular">版 2026-09-30b</small><small id="cvState">検出の準備中…</small></header>
 
   <section class="card" id="stepVideo">
     <div class="step"><i>1</i>動画を選ぶ</div>
@@ -144,7 +144,8 @@ video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-eve
       <div class="row"><span class="muted">文字の大きさ</span><div class="seg" id="size"><button data-v="s">小</button><button data-v="m" class="on">中</button><button data-v="l">大</button></div></div>
     </div>
     <div class="row">
-      <button class="primary" id="save">JPEGで保存（800×800）</button>
+      <button class="primary" id="save">保存（JPEG 800×800）</button>
+      <button id="share" hidden>共有…</button>
       <button id="back">候補に戻る</button>
       <span class="muted tabular">保存 <b id="savedN">0</b> 枚</span>
     </div>
@@ -152,107 +153,11 @@ video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-eve
 </div>
 <video class="src" id="vid" muted playsinline preload="auto"></video>
 
-<script src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js" async id="cvScript"></script>
-<script>
+<script type="text/plain" id="cvWorker">
 "use strict";
-const $ = id => document.getElementById(id);
-const OUT = 800, FRAME = 1 / 30, DET_LONG = 480, MAX_SAMPLES = 300, TOP_K = 18;
-const vid = $("vid");
-let cv = null, classifier = null, verifier = null, cvReady = null;
-let videoName = "", scanning = false, stopReq = false, samples = [];
-let src = document.createElement("canvas"), srcT = 0, face = null, crop = null;
-const srcOrig = src;                 // 無修正のコマ
-let srcAuto = null, autoSpots = [], autoToken = 0, saving = false;   // 自動修正版と直した所
-let savedCount = 0, sizeKey = "m", sex = "", body = null, downloads;
-
-/* ---------- OpenCV + 猫顔検出器 ---------- */
-cvReady = new Promise((resolve, reject) => {
-  const s = $("cvScript");
-  const init = async () => {
-    try {
-      let c = window.cv;
-      if (c instanceof Promise) c = await c;
-      else if (!c.Mat) await new Promise(r => { c.onRuntimeInitialized = r; });
-      // 主：extended、確認用：標準（2つが同じ所を顔と見たら確か）
-      const load = async (file) => {
-        const res = await fetch(file);
-        if (!res.ok) throw new Error("猫顔検出器のファイルが読めません");
-        c.FS_createDataFile("/", file, new Uint8Array(await res.arrayBuffer()), true, false, false);
-        const cl = new c.CascadeClassifier();
-        if (!cl.load(file)) throw new Error("猫顔検出器を読み込めません");
-        return cl;
-      };
-      const [cl, vf] = await Promise.all([load("haarcascade_frontalcatface_extended.xml"), load("haarcascade_frontalcatface.xml")]);
-      cv = c; classifier = cl; verifier = vf;
-      $("cvState").textContent = "猫顔検出 OK";
-      resolve();
-    } catch (e) { $("cvState").textContent = "検出が使えません（手動で探せます）"; reject(e); }
-  };
-  if (window.cv) init(); else { s.addEventListener("load", init); s.addEventListener("error", () => { $("cvState").textContent = "検出が使えません（手動で探せます）"; reject(new Error("opencv.js load failed")); }); }
-});
-cvReady.catch(e => console.warn(e));
-
-/* claude.ai 上では downloads 機能、それ以外は通常のダウンロード／共有 */
-if (window.claude && window.claude.use) window.claude.use("downloads").then(d => { downloads = d; }).catch(() => {});
-
-/* ---------- 動画の読み込み ---------- */
-const drop = $("drop");
-$("file").addEventListener("change", e => { const f = e.target.files[0]; if (f) openVideo(f); e.target.value = ""; });
-["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
-["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
-drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) openVideo(f); });
-
-function showVideoMsg(html, bad) { const m = $("videoMsg"); m.className = "msg" + (bad ? " bad" : ""); m.innerHTML = html; m.hidden = !html; }
-
-const HEVC_HELP = `この動画はこのブラウザでは開けませんでした。iPhoneの動画（HEVC形式）は、Windowsのブラウザでは開けないことがあります。
-<ul><li>スマホのブラウザでこのページを開いて、そこで動画を選ぶ</li>
-<li>iPhoneの「設定 → カメラ → フォーマット」を「互換性優先」にして撮る</li>
-<li>Windowsに「HEVCビデオ拡張機能」を入れて、Edgeで開く</li></ul>`;
-
-async function openVideo(file) {
-  stopReq = true;
-  while (scanning) await sleep(30);
-  videoName = file.name.replace(/\.[^.]+$/, "");
-  loadBody();
-  $("stepPick").hidden = true; $("stepEdit").hidden = true; showVideoMsg("");
-  if (vid.src) URL.revokeObjectURL(vid.src);
-  vid.src = URL.createObjectURL(file);
-  vid.load();
-  vid.play().then(() => vid.pause()).catch(() => {});   // iOS で最初のコマを描けるようにする
-  const ok = await new Promise(res => {
-    const t = setTimeout(() => res(false), 15000);
-    vid.onloadeddata = () => { clearTimeout(t); res(vid.videoWidth > 0); };
-    vid.onerror = () => { clearTimeout(t); res(false); };
-  });
-  vid.onloadeddata = vid.onerror = null;
-  if (!ok) { showVideoMsg(HEVC_HELP, true); return; }
-  vid.pause();
-  $("scrub").value = 0;
-  try { await cvReady; } catch {
-    showVideoMsg("猫顔の自動検出が使えないため、下の「自分で探す」でコマを選んでください。", true);
-    showPick([]); return;
-  }
-  scan();
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-function seek(t) {
-  t = Math.max(0, Math.min(t, (vid.duration || 0) - 0.001));
-  return new Promise(res => {
-    let done = false;
-    const fin = () => { if (!done) { done = true; clearTimeout(to); res(); } };
-    const to = setTimeout(fin, 3000);
-    vid.addEventListener("seeked", () => {
-      if (vid.requestVideoFrameCallback && document.visibilityState === "visible") { vid.requestVideoFrameCallback(fin); setTimeout(fin, 120); } else fin();
-    }, { once: true });
-    vid.currentTime = t;
-  });
-}
-
-/* ---------- 候補出し ---------- */
-const det = document.createElement("canvas");
-const detCtx = det.getContext("2d", { willReadFrequently: true });
-
+/* 画像処理の作業役（Web Worker）。OpenCV の重い処理（顔の検出・自動レタッチ・なぞって消す）を
+   画面とは別のスレッドで行い、スマホでも画面が固まらないようにする */
+let cv = null, classifier = null, verifier = null;
 function iou(a, b) {
   const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
   const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
@@ -269,8 +174,8 @@ function cascade(cl, mat, minPx) {
 /* 猫の顔を1つ探す。首をかしげた顔用に ±22° 回した画像でも探す。
    主の検出器で見つけた所を確認用の検出器で見直し、両方が顔と見た所か、主が強く反応した所（n≥12）だけ採用 */
 const ANGLES = [0, -22, 22];
-function detectOn(canvas) {
-  const img = cv.imread(canvas), gray = new cv.Mat();
+function detectFace(data) {
+  const img = cv.matFromImageData(data), gray = new cv.Mat();
   cv.cvtColor(img, gray, cv.COLOR_RGBA2GRAY);
   cv.equalizeHist(gray, gray);
   const W = gray.cols, H = gray.rows, minPx = Math.round(Math.min(W, H) * 0.08);
@@ -316,318 +221,20 @@ function detectOn(canvas) {
   return best;
 }
 
-/* 全身の範囲：体の枠（COCO-SSD）と顔を合わせた四角。体が取れない時は顔から推定（顔の約3.4×4.6倍、下向き） */
-function catBox(f, b) {
-  const u = b || { x: f.x + f.w / 2 - f.w * 1.7, y: f.y - f.h * 0.35, w: f.w * 3.4, h: f.h * 4.6 };
-  const x0 = Math.min(u.x, f.x), y0 = Math.min(u.y, f.y);
-  return { x: x0, y: y0, w: Math.max(u.x + u.w, f.x + f.w) - x0, h: Math.max(u.y + u.h, f.y + f.h) - y0 };
-}
-/* 全身が入る正方形。名前の帯（band＝高さの割合）がある時は、帯の上に全身が収まるようにする */
-function cropFor(f, W, H, b = null, band = 0) {
-  const u = catBox(f, b), m = 0.06 * Math.max(u.w, u.h);
-  const need = Math.max(u.w + 2 * m, (u.h + 2 * m) / (1 - band), f.w * 2.2);
-  const side = Math.min(need, W, H);
-  let cx = u.x + u.w / 2, cy = u.y + u.h / 2 + band * side / 2;
-  if ((u.h + 2 * m) / (1 - band) > side) cy = f.y - 0.12 * side + side / 2;   // 入り切らない時は顔を上寄りに
-  // 顔は必ず枠の中に
-  cx = Math.min(Math.max(cx, f.x + f.w - side / 2), f.x + side / 2);
-  cy = Math.min(Math.max(cy, f.y + f.h - side / 2), f.y + side / 2);
-  return clampCrop({ cx, cy, side }, W, H);
-}
-function faceCrop(f, W, H) {
-  return clampCrop({ cx: f.x + f.w / 2, cy: f.y + f.h / 2 + f.w * 0.12, side: Math.min(f.w * 2.6, W, H) }, W, H);
-}
-function clampCrop(c, W, H) {
-  const side = Math.max(32, Math.min(c.side, W, H));
-  return { side, cx: Math.min(Math.max(c.cx, side / 2), W - side / 2), cy: Math.min(Math.max(c.cy, side / 2), H - side / 2) };
-}
-/* 全身のうち枠に入る割合（1 = 全部入る） */
-function fitRatio(f, W, H, b = null) {
-  const u = catBox(f, b), c = cropFor(f, W, H, b);
-  const ix = Math.max(0, Math.min(u.x + u.w, c.cx + c.side / 2) - Math.max(u.x, c.cx - c.side / 2));
-  const iy = Math.max(0, Math.min(u.y + u.h, c.cy + c.side / 2) - Math.max(u.y, c.cy - c.side / 2));
-  return Math.min(1, (ix * iy) / (u.w * u.h));
-}
-function thumbOf(canvas, c) {
-  const th = document.createElement("canvas");
-  th.width = th.height = 160;
-  th.getContext("2d").drawImage(canvas, c.cx - c.side / 2, c.cy - c.side / 2, c.side, c.side, 0, 0, 160, 160);
-  return th.toDataURL("image/jpeg", 0.75);
-}
-
-/* ---------- 猫の全身（COCO-SSD）。候補のコマと仕上げ画面だけで使う ---------- */
-const MODEL_URLS = ["ssd/model.json", "https://storage.googleapis.com/tfjs-models/savedmodel/ssdlite_mobilenet_v2/model.json"];
-let bodyModel = null, bodyReady = null;
-function loadScript(url) {
-  return new Promise((res, rej) => { const el = document.createElement("script"); el.src = url; el.onload = res; el.onerror = () => rej(new Error(url)); document.head.appendChild(el); });
-}
-function loadBody() {
-  if (!bodyReady) bodyReady = (async () => {
-    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
-    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");
-    for (const modelUrl of MODEL_URLS) {
-      try { bodyModel = await cocoSsd.load({ base: "lite_mobilenet_v2", modelUrl }); return true; }
-      catch (e) { console.warn("全身モデルを読めません", modelUrl, e); }
-    }
-    return false;
-  })().catch(e => { console.warn(e); return false; });
-  return bodyReady;
-}
-/* 体が動画の端で切れている辺1つにつき減点 */
-function edgeCut(b, W, H) {
-  const e = 0.01 * Math.max(W, H);
-  const n = (b.x < e) + (b.y < e) + (b.x + b.w > W - e) + (b.y + b.h > H - e);
-  return Math.pow(0.85, n);
-}
-/* 顔のまわりが画面の端で切れていないか（顔の2.6倍の枠が画面に入る割合の2乗） */
-function faceFit(f, W, H) {
-  const s = f.w * 2.6, cx = f.x + f.w / 2, cy = f.y + f.h / 2 + f.w * 0.12;
-  const ix = Math.max(0, Math.min(W, cx + s / 2) - Math.max(0, cx - s / 2));
-  const iy = Math.max(0, Math.min(H, cy + s / 2) - Math.max(0, cy - s / 2));
-  return Math.pow(Math.min(1, (ix * iy) / (s * s)), 2);
-}
-/* 顔と体の位置関係のもっともらしさ。縦長の体の下の方にある「顔」はお尻や手の見まちがいが多い */
-function plausible(f, b) {
-  const fy = (f.y + f.h / 2 - b.y) / b.h;
-  return b.h > b.w * 1.2 && fy > 0.6 ? 0.25 : 1;
-}
-/* 顔を含む猫の枠（無ければ null） */
-async function findBody(canvas, f) {
-  if (!bodyModel || !f) return null;
-  const preds = await bodyModel.detect(canvas, 10, 0.25);
-  const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
-  let best = null;
-  for (const p of preds) {
-    if (!["cat", "dog", "teddy bear"].includes(p.class)) continue;
-    const [x, y, w, h] = p.bbox, tol = f.w * 0.3;
-    if (cx < x - tol || cx > x + w + tol || cy < y - tol || cy > y + h + tol) continue;
-    const sc = p.score * (p.class === "cat" ? 1 : 0.7);
-    if (!best || sc > best.sc) best = { x, y, w, h, sc };
-  }
-  return best;
-}
-
-/* 1コマ分を調べて記録 */
-function sampleFrame(t) {
-  detCtx.drawImage(vid, 0, 0, det.width, det.height);
-  const f = detectOn(det);
-  if (!f) return false;
-  samples.push({ t, f, size: f.w / Math.min(det.width, det.height), fit: fitRatio(f, det.width, det.height), thumb: thumbOf(det, cropFor(f, det.width, det.height)) });
-  return true;
-}
-
-/* 速めに再生しながらコマを拾う（シークより速い）。再生速度は検出の重さに合わせて調整 */
-async function scan() {
-  scanning = true; stopReq = false; samples = [];
-  const dur = vid.duration, step = Math.max(0.2, dur / MAX_SAMPLES);
-  const W = vid.videoWidth, H = vid.videoHeight, k = Math.min(1, DET_LONG / Math.max(W, H));
-  det.width = Math.round(W * k); det.height = Math.round(H * k);
-  $("scanBox").hidden = false; $("stopScan").disabled = false;
-  $("scanLabel").textContent = "顔を探しています…";
-  const t0 = performance.now(); let n = 0, found = 0, next = 0, detMs = 150;
-  // かける時間の目安 = 動画の長さ（短い動画は15秒）。検出が遅い端末ではコマを間引く
-  const budget = Math.max(15, dur);
-  const stepNow = () => Math.max(step, dur * (detMs / 1000) / budget);
-  const show = t => {
-    $("scanBar").style.width = (100 * Math.min(1, t / dur)).toFixed(1) + "%";
-    $("stN").textContent = n; $("stF").textContent = found;
-    $("stT").textContent = ((performance.now() - t0) / 1000).toFixed(0);
-  };
-  await seek(0);
-  let playOk = false;
-  if (vid.requestVideoFrameCallback) {
-    let last = performance.now();
-    vid.playbackRate = 2;
-    await new Promise(done => {
-      // 画面が隠れているとコマの通知が来ないので、止まったらシーク方式へ
-      const dog = setInterval(() => { if (performance.now() - last > 1500) { clearInterval(dog); done(); } }, 300);
-      const fin = () => { clearInterval(dog); playOk = true; done(); };
-      const onFrame = (now, meta) => {
-        last = performance.now();
-        if (stopReq || vid.ended) { fin(); return; }
-        const t = meta.mediaTime;
-        if (t >= next) {
-          const a = performance.now();
-          if (sampleFrame(t)) found++;
-          detMs = n ? detMs * 0.8 + (performance.now() - a) * 0.2 : performance.now() - a;
-          n++; next = t + stepNow();
-          // 1回の検出の間に進む動画の長さが1コマ分の間隔になる速度（0.25〜8倍）
-          vid.playbackRate = Math.max(0.25, Math.min(8, stepNow() / (detMs / 1000 * 1.3)));
-          show(t);
-        }
-        vid.requestVideoFrameCallback(onFrame);
-      };
-      vid.addEventListener("ended", fin, { once: true });
-      vid.requestVideoFrameCallback(onFrame);
-      vid.play().catch(() => { clearInterval(dog); done(); });
-    });
-    vid.pause(); vid.playbackRate = 1;
-  }
-  if (!playOk) {
-    for (let t = Math.max(0.05, next); t < dur && !stopReq; t += stepNow()) {
-      await seek(t);
-      const a = performance.now();
-      if (sampleFrame(vid.currentTime)) found++;
-      detMs = n ? detMs * 0.8 + (performance.now() - a) * 0.2 : performance.now() - a;
-      n++; show(t);
-    }
-  }
-  show(dur);
-  $("scanBar").style.width = "100%";
-  $("scanLabel").textContent = stopReq ? "途中まで調べました" : "調べ終わりました";
-  $("stopScan").disabled = true;
-  const pool = rank(samples, dur, 30);
-  if (pool.length && !stopReq) await refineBodies(pool);
-  scanning = false;
-  showPick(finish(pool));
-}
-/* 上位のコマだけ全身の枠を取り、全身が枠に収まるかで点数を付け直す */
-async function refineBodies(pool) {
-  $("scanLabel").textContent = "全身の位置を調べています…";
-  const ok = await Promise.race([loadBody(), sleep(25000).then(() => false)]);
-  if (!ok) { $("scanLabel").textContent = "全身の検出が使えないため、顔から全身の位置を推定しました"; return; }
-  let i = 0;
-  for (const s of pool) {
-    if (stopReq) break;
-    await seek(s.t);
-    detCtx.drawImage(vid, 0, 0, det.width, det.height);
-    s.body = await findBody(det, s.f);
-    s.fit = fitRatio(s.f, det.width, det.height, s.body);
-    s.thumb = thumbOf(det, cropFor(s.f, det.width, det.height, s.body));
-    s.score = s.base * (0.6 + 0.4 * s.fit) * (s.body ? plausible(s.f, s.body) * edgeCut(s.body, det.width, det.height) : 0.8);
-    $("scanBar").style.width = (100 * ++i / pool.length).toFixed(0) + "%";
-  }
-  $("scanLabel").textContent = "調べ終わりました";
-}
-$("stopScan").onclick = () => { stopReq = true; };
-
-/* 点数 = 顔の大きさ × シャープさ × 検出の確かさ（2つの検出器の反応数）× 顔まわりの収まり × 全身が正方形に入るか（弱め）。
-   上位30コマは全身の枠を取り、体が動画の端で切れている・顔の位置がおかしい時に減点。近い時刻は1つにまとめる */
-function rank(list, dur, limit = TOP_K) {
-  if (!list.length) return [];
-  const sharps = list.map(s => s.f.sharp).sort((a, b) => a - b);
-  const ref = sharps[Math.floor(sharps.length * 0.9)] || 1;
-  for (const s of list) {
-    const size = Math.pow(Math.min(1, s.size / 0.35), 0.7);
-    const sharp = Math.min(1, s.f.sharp / ref);
-    s.base = size * (0.3 + 0.7 * sharp) * s.f.conf;
-    s.score = s.base * (0.6 + 0.4 * s.fit) * faceFit(s.f, det.width, det.height);
-  }
-  const gap = Math.max(1, dur / 40), picked = [];
-  for (const s of [...list].sort((a, b) => b.score - a.score)) {
-    if (picked.every(p => Math.abs(p.t - s.t) >= gap)) picked.push(s);
-    if (picked.length >= limit) break;
-  }
-  return picked;
-}
-function finish(pool) {
-  const picked = [...pool].sort((a, b) => b.score - a.score).slice(0, TOP_K);
-  const top = (picked[0] && picked[0].score) || 1;
-  picked.forEach(p => { p.pts = Math.round(100 * p.score / top); });
-  return picked;
-}
-
-function showPick(list) {
-  const g = $("grid"); g.innerHTML = "";
-  $("pickNote").textContent = list.length ? "点数の高い順。タップで仕上げへ" : "猫の顔が見つかりませんでした。下の「自分で探す」で選んでください。";
-  if (!list.length) g.parentElement.querySelector("details").open = true;
-  for (const s of list) {
-    const b = document.createElement("button");
-    b.className = "pick"; b.title = s.t.toFixed(2) + " 秒";
-    b.innerHTML = `<img alt="" src="${s.thumb}"><span>${s.t.toFixed(1)}秒</span><em>${s.pts}</em>`;
-    b.onclick = () => { g.querySelectorAll(".pick").forEach(x => x.classList.remove("on")); b.classList.add("on"); openEditor(s.t, null); };
-    g.appendChild(b);
-  }
-  $("stepPick").hidden = false;
-}
-
-/* ---------- 自分で探す ---------- */
-const scrubView = $("scrubView");
-let scrubBusy = false, scrubWant = null;
-$("scrub").addEventListener("input", async () => {
-  scrubWant = $("scrub").value / 1000 * vid.duration;
-  $("scrubT").textContent = scrubWant.toFixed(1) + " 秒";
-  if (scrubBusy) return;
-  scrubBusy = true;
-  while (scrubWant !== null) {
-    const t = scrubWant; scrubWant = null;
-    await seek(t);
-    scrubView.width = 480; scrubView.height = Math.round(480 * vid.videoHeight / vid.videoWidth);
-    scrubView.getContext("2d").drawImage(vid, 0, 0, scrubView.width, scrubView.height);
-  }
-  scrubBusy = false;
-});
-$("useScrub").onclick = () => openEditor($("scrub").value / 1000 * vid.duration, null);
-
-/* ---------- 仕上げ ---------- */
-async function grabFrame(t) {
-  await seek(t);
-  srcT = vid.currentTime;
-  srcOrig.width = vid.videoWidth; srcOrig.height = vid.videoHeight;
-  srcOrig.getContext("2d", { willReadFrequently: true }).drawImage(vid, 0, 0);
-  autoToken++; srcAuto = null; autoSpots = [];
-  setVer("orig");
-  $("editT").textContent = srcT.toFixed(2) + " 秒";
-}
-/* 仕上げ用のコマで顔と全身を取り直す（元画像の座標で face / body に入れる） */
-async function findCat() {
-  if (!classifier) { face = body = null; return; }
-  const k = Math.min(1, DET_LONG / Math.max(src.width, src.height)), sc = r => r && { x: r.x / k, y: r.y / k, w: r.w / k, h: r.h / k };
-  det.width = Math.round(src.width * k); det.height = Math.round(src.height * k);
-  detCtx.drawImage(src, 0, 0, det.width, det.height);
-  const f = detectOn(det);
-  face = sc(f);
-  body = f ? sc(await findBody(det, f)) : null;
-}
-const bandNow = () => $("nameOn").checked ? BAND[sizeKey] : 0;
-function defaultCrop() {
-  const W = src.width, H = src.height;
-  return face ? cropFor(face, W, H, body, bandNow()) : clampCrop({ cx: W / 2, cy: H / 2, side: Math.min(W, H) * 0.9 }, W, H);
-}
-async function openEditor(t) {
-  await grabFrame(t);
-  await findCat();
-  crop = defaultCrop();
-  $("stepEdit").hidden = false;
-  syncZoom(); draw();
-  $("stepEdit").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
-  runAuto();
-}
-async function stepFrame(d) {
-  if (undoStack.length) toast("コマを送ったので、消した跡はリセットされました");
-  await grabFrame(srcT + d);
-  const f = face, b = body;
-  await findCat(); face = face || f; body = body || b;
-  draw();
-  runAuto();
-}
-$("fPrev").onclick = () => stepFrame(-FRAME);
-$("fNext").onclick = () => stepFrame(FRAME);
-$("fitBody").onclick = async () => { const f = face, b = body; await findCat(); face = face || f; body = body || b; crop = defaultCrop(); syncZoom(); draw(); };
-$("fitFace").onclick = async () => { if (!face) await findCat(); if (!face) { toast("顔が見つかりません。枠を手で動かしてください"); return; } crop = faceCrop(face, src.width, src.height); syncZoom(); draw(); };
-$("back").onclick = () => $("stepPick").scrollIntoView({ block: "start" });
-
-/* ---------- 自動レタッチ（猫のうしろの服・ソファ・床などのシミ） ----------
-   1) 猫のまわりの輪から「面」（服など）の色を取る
-   2) 周り（メディアンぼかし）との色の差が大きい小さな斑点を探す
-   3) 面に囲まれていて、猫・手・顔に触れない斑点だけを inpaint で埋める
-   しわ（明るさだけ違う・細長い）や柄は残るように、色の差・形・大きさで絞る */
 function medianOf(arr) {
   const step = Math.max(1, Math.floor(arr.length / 20000)), n = Math.ceil(arr.length / step), t = new Float32Array(n);
   for (let i = 0, j = 0; i < arr.length; i += step) t[j++] = arr[i];
   t.sort(); return t[n >> 1];
 }
-/* 調整値：thrK＝ばらつきの何倍から候補か、strength＝斑点の平均の色の差の下限、protect＝猫・手のまわりの守る幅(px) */
-const AUTO = { thrK: 6, minThr: 12, strength: 0, peak: 0, chroma: 10, protect: 11, medK: 0.07 };
-function autoRetouch(srcC, f, b, dbg = null) {
-  const k = Math.min(1, 640 / Math.max(srcC.width, srcC.height));
-  const W = Math.round(srcC.width * k), H = Math.round(srcC.height * k), A = W * H;
-  const wc = document.createElement("canvas"); wc.width = W; wc.height = H;
-  wc.getContext("2d").drawImage(srcC, 0, 0, W, H);
+/* data＝元の大きさのコマ、f＝顔、cbF＝猫の枠（どちらも元の座標）、AUTO＝調整値 */
+function autoRetouch(data, f, cbF, AUTO, dbg = null) {
+  const k = Math.min(1, 640 / Math.max(data.width, data.height));
+  const W = Math.round(data.width * k), H = Math.round(data.height * k), A = W * H;
   const mats = [];
   const M = () => { const m = new cv.Mat(); mats.push(m); return m; };
   try {
-    const rgba = cv.imread(wc); mats.push(rgba);
+    const full = cv.matFromImageData(data), rgba = M(); mats.push(full);
+    cv.resize(full, rgba, new cv.Size(W, H), 0, 0, cv.INTER_AREA);
     const rgb = M(), lab = M(), med = M(), mlab = M();
     cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
     cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
@@ -635,7 +242,7 @@ function autoRetouch(srcC, f, b, dbg = null) {
     cv.cvtColor(med, mlab, cv.COLOR_RGB2Lab);
     const Lb = lab.data, Mb = mlab.data;
     const sc = r => r && { x: r.x * k, y: r.y * k, w: r.w * k, h: r.h * k };
-    const fs = sc(f), cb = catBox(fs, sc(b));
+    const fs = sc(f), cb = sc(cbF);
     const x0 = Math.max(0, Math.floor(cb.x)), y0 = Math.max(0, Math.floor(cb.y));
     const x1 = Math.min(W, Math.ceil(cb.x + cb.w)), y1 = Math.min(H, Math.ceil(cb.y + cb.h));
     const inCat = (x, y) => x >= x0 && x < x1 && y >= y0 && y < y1;
@@ -726,15 +333,472 @@ function autoRetouch(srcC, f, b, dbg = null) {
     if (!spots.length) return { spots };
     cv.dilate(keep, keep, k5);
     // 元の大きさで埋める
-    const full = cv.imread(srcC), fRgb = M(), fMask = M(), fOut = M(), fRgba = M(); mats.push(full);
+    const fRgb = M(), fMask = M(), fOut = M(), fRgba = M();
     cv.cvtColor(full, fRgb, cv.COLOR_RGBA2RGB);
-    cv.resize(keep, fMask, new cv.Size(srcC.width, srcC.height), 0, 0, cv.INTER_NEAREST);
+    cv.resize(keep, fMask, new cv.Size(data.width, data.height), 0, 0, cv.INTER_NEAREST);
     cv.inpaint(fRgb, fMask, fOut, Math.max(3, 5 / k), cv.INPAINT_TELEA);
     cv.cvtColor(fOut, fRgba, cv.COLOR_RGB2RGBA);
-    const oc = document.createElement("canvas"); oc.width = srcC.width; oc.height = srcC.height;
-    oc.getContext("2d", { willReadFrequently: true }).putImageData(new ImageData(new Uint8ClampedArray(fRgba.data), oc.width, oc.height), 0, 0);
-    return { canvas: oc, spots };
+    const out = new Uint8ClampedArray(fRgba.data);
+    return { data: out.buffer, spots };
   } finally { mats.forEach(m => { try { m.delete(); } catch {} }); }
+}
+/* なぞった所を埋める。data＝周りの四角、mask＝白いところを埋める */
+function inpaintPatch(data, mask, radius) {
+  const rgba = cv.matFromImageData(data), rgb = new cv.Mat(), dst = new cv.Mat(), m4 = cv.matFromImageData(mask), m = new cv.Mat(), outRgba = new cv.Mat();
+  try {
+    cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(m4, m, cv.COLOR_RGBA2GRAY);
+    cv.threshold(m, m, 127, 255, cv.THRESH_BINARY);
+    cv.inpaint(rgb, m, dst, radius, cv.INPAINT_TELEA);
+    cv.cvtColor(dst, outRgba, cv.COLOR_RGB2RGBA);
+    return new Uint8ClampedArray(outRgba.data).buffer;
+  } finally { [rgba, rgb, dst, m4, m, outRgba].forEach(x => x.delete()); }
+}
+async function init(p) {
+  importScripts(p.cvUrl);
+  let c = self.cv;
+  if (c instanceof Promise) c = await c;
+  else if (!c.Mat) await new Promise(r => { c.onRuntimeInitialized = r; const t = setInterval(() => { if (c.Mat) { clearInterval(t); r(); } }, 50); });
+  // 主：extended、確認用：標準（2つが同じ所を顔と見たら確か）
+  const load = async (file) => {
+    const res = await fetch(new URL(file, p.base));
+    if (!res.ok) throw new Error("猫顔検出器のファイルが読めません");
+    c.FS_createDataFile("/", file, new Uint8Array(await res.arrayBuffer()), true, false, false);
+    const cl = new c.CascadeClassifier();
+    if (!cl.load(file)) throw new Error("猫顔検出器を読み込めません");
+    return cl;
+  };
+  [classifier, verifier] = await Promise.all([load("haarcascade_frontalcatface_extended.xml"), load("haarcascade_frontalcatface.xml")]);
+  cv = c;
+  return true;
+}
+self.onmessage = async e => {
+  const { id, type, p } = e.data;
+  try {
+    let r, tr = [];
+    if (type === "init") r = await init(p);
+    else if (type === "detect") r = detectFace(p.img);
+    else if (type === "retouch") { r = autoRetouch(p.img, p.face, p.cb, p.auto); if (r.data) tr = [r.data]; }
+    else if (type === "inpaint") { r = inpaintPatch(p.img, p.mask, p.radius); tr = [r]; }
+    self.postMessage({ id, r }, tr);
+  } catch (err) { self.postMessage({ id, err: String((err && err.message) || err) }); }
+};
+</script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const OUT = 800, FRAME = 1 / 30, DET_LONG = 480, MAX_SAMPLES = 300, TOP_K = 18;
+const vid = $("vid");
+let cvReady = null;
+let videoName = "", scanning = false, stopReq = false, samples = [];
+let src = document.createElement("canvas"), srcT = 0, face = null, crop = null;
+const srcOrig = src;                 // 無修正のコマ
+let srcAuto = null, autoSpots = [], autoToken = 0, saving = false;   // 自動修正版と直した所
+let savedCount = 0, sizeKey = "m", sex = "", body = null, downloads;
+
+/* ---------- OpenCV（別スレッドの作業役）+ 猫顔検出器 ---------- */
+const CV_URL = "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js";
+let cvOk = false, cvw = null, cvSeq = 0;
+const cvWait = new Map();
+function cvCall(type, p, transfer = []) {
+  return new Promise((res, rej) => { const id = ++cvSeq; cvWait.set(id, { res, rej }); cvw.postMessage({ id, type, p }, transfer); });
+}
+cvReady = (async () => {
+  try {
+    cvw = new Worker(URL.createObjectURL(new Blob([$("cvWorker").textContent], { type: "text/javascript" })));
+    cvw.onmessage = e => { const w = cvWait.get(e.data.id); if (!w) return; cvWait.delete(e.data.id); e.data.err ? w.rej(new Error(e.data.err)) : w.res(e.data.r); };
+    cvw.onerror = e => { console.warn(e); cvWait.forEach(w => w.rej(new Error("作業役が止まりました"))); cvWait.clear(); };
+    await cvCall("init", { base: location.href, cvUrl: CV_URL });
+    cvOk = true;
+    $("cvState").textContent = "猫顔検出 OK";
+  } catch (e) { $("cvState").textContent = "検出が使えません（手動で探せます）"; throw e; }
+})();
+/* キャンバスの絵で猫の顔を探す（作業役で）。見つからなければ null */
+function detectFace(canvas) {
+  const img = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height);
+  return cvCall("detect", { img }, [img.data.buffer]);
+}
+cvReady.catch(e => console.warn(e));
+
+/* claude.ai 上では downloads 機能、それ以外は通常のダウンロード／共有 */
+if (window.claude && window.claude.use) window.claude.use("downloads").then(d => { downloads = d; if (d) $("share").hidden = true; }).catch(() => {});
+
+/* ---------- 動画の読み込み ---------- */
+const drop = $("drop");
+$("file").addEventListener("change", e => { const f = e.target.files[0]; if (f) openVideo(f); e.target.value = ""; });
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) openVideo(f); });
+
+function showVideoMsg(html, bad) { const m = $("videoMsg"); m.className = "msg" + (bad ? " bad" : ""); m.innerHTML = html; m.hidden = !html; }
+
+const HEVC_HELP = `この動画はこのブラウザでは開けませんでした。iPhoneの動画（HEVC形式）は、Windowsのブラウザでは開けないことがあります。
+<ul><li>スマホのブラウザでこのページを開いて、そこで動画を選ぶ</li>
+<li>iPhoneの「設定 → カメラ → フォーマット」を「互換性優先」にして撮る</li>
+<li>Windowsに「HEVCビデオ拡張機能」を入れて、Edgeで開く</li></ul>`;
+
+async function openVideo(file) {
+  stopReq = true;
+  while (scanning) await sleep(30);
+  videoName = file.name.replace(/\.[^.]+$/, "");
+  $("stepPick").hidden = true; $("stepEdit").hidden = true; showVideoMsg("");
+  if (vid.src) URL.revokeObjectURL(vid.src);
+  vid.src = URL.createObjectURL(file);
+  vid.load();
+  vid.play().then(() => vid.pause()).catch(() => {});   // iOS で最初のコマを描けるようにする
+  const ok = await new Promise(res => {
+    const t = setTimeout(() => res(false), 15000);
+    vid.onloadeddata = () => { clearTimeout(t); res(vid.videoWidth > 0); };
+    vid.onerror = () => { clearTimeout(t); res(false); };
+  });
+  vid.onloadeddata = vid.onerror = null;
+  if (!ok) { showVideoMsg(HEVC_HELP, true); return; }
+  vid.pause();
+  $("scrub").value = 0;
+  try { await cvReady; } catch {
+    showVideoMsg("猫顔の自動検出が使えないため、下の「自分で探す」でコマを選んでください。", true);
+    showPick([]); return;
+  }
+  scan();
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function seek(t) {
+  t = Math.max(0, Math.min(t, (vid.duration || 0) - 0.001));
+  return new Promise(res => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; clearTimeout(to); res(); } };
+    const to = setTimeout(fin, 3000);
+    vid.addEventListener("seeked", () => {
+      if (vid.requestVideoFrameCallback && document.visibilityState === "visible") { vid.requestVideoFrameCallback(fin); setTimeout(fin, 120); } else fin();
+    }, { once: true });
+    vid.currentTime = t;
+  });
+}
+
+/* ---------- 候補出し ---------- */
+const det = document.createElement("canvas");
+const detCtx = det.getContext("2d", { willReadFrequently: true });
+
+/* 全身の範囲：体の枠（COCO-SSD）と顔を合わせた四角。体が取れない時は顔から推定（顔の約3.4×4.6倍、下向き） */
+function catBox(f, b) {
+  const u = b || { x: f.x + f.w / 2 - f.w * 1.7, y: f.y - f.h * 0.35, w: f.w * 3.4, h: f.h * 4.6 };
+  const x0 = Math.min(u.x, f.x), y0 = Math.min(u.y, f.y);
+  return { x: x0, y: y0, w: Math.max(u.x + u.w, f.x + f.w) - x0, h: Math.max(u.y + u.h, f.y + f.h) - y0 };
+}
+/* 全身が入る正方形。名前の帯（band＝高さの割合）がある時は、帯の上に全身が収まるようにする */
+function cropFor(f, W, H, b = null, band = 0) {
+  const u = catBox(f, b), m = 0.06 * Math.max(u.w, u.h);
+  const need = Math.max(u.w + 2 * m, (u.h + 2 * m) / (1 - band), f.w * 2.2);
+  const side = Math.min(need, W, H);
+  let cx = u.x + u.w / 2, cy = u.y + u.h / 2 + band * side / 2;
+  if ((u.h + 2 * m) / (1 - band) > side) cy = f.y - 0.12 * side + side / 2;   // 入り切らない時は顔を上寄りに
+  // 顔は必ず枠の中に
+  cx = Math.min(Math.max(cx, f.x + f.w - side / 2), f.x + side / 2);
+  cy = Math.min(Math.max(cy, f.y + f.h - side / 2), f.y + side / 2);
+  return clampCrop({ cx, cy, side }, W, H);
+}
+function faceCrop(f, W, H) {
+  return clampCrop({ cx: f.x + f.w / 2, cy: f.y + f.h / 2 + f.w * 0.12, side: Math.min(f.w * 2.6, W, H) }, W, H);
+}
+function clampCrop(c, W, H) {
+  const side = Math.max(32, Math.min(c.side, W, H));
+  return { side, cx: Math.min(Math.max(c.cx, side / 2), W - side / 2), cy: Math.min(Math.max(c.cy, side / 2), H - side / 2) };
+}
+/* 全身のうち枠に入る割合（1 = 全部入る） */
+function fitRatio(f, W, H, b = null) {
+  const u = catBox(f, b), c = cropFor(f, W, H, b);
+  const ix = Math.max(0, Math.min(u.x + u.w, c.cx + c.side / 2) - Math.max(u.x, c.cx - c.side / 2));
+  const iy = Math.max(0, Math.min(u.y + u.h, c.cy + c.side / 2) - Math.max(u.y, c.cy - c.side / 2));
+  return Math.min(1, (ix * iy) / (u.w * u.h));
+}
+function thumbOf(canvas, c) {
+  const th = document.createElement("canvas");
+  th.width = th.height = 160;
+  th.getContext("2d").drawImage(canvas, c.cx - c.side / 2, c.cy - c.side / 2, c.side, c.side, 0, 0, 160, 160);
+  return th.toDataURL("image/jpeg", 0.75);
+}
+
+/* ---------- 猫の全身（COCO-SSD）。候補のコマと仕上げ画面だけで使う ---------- */
+const MODEL_URLS = ["ssd/model.json", "https://storage.googleapis.com/tfjs-models/savedmodel/ssdlite_mobilenet_v2/model.json"];
+let bodyModel = null, bodyReady = null;
+function loadScript(url) {
+  return new Promise((res, rej) => { const el = document.createElement("script"); el.src = url; el.onload = res; el.onerror = () => rej(new Error(url)); document.head.appendChild(el); });
+}
+function loadBody() {
+  if (!bodyReady) bodyReady = (async () => {
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");
+    for (const modelUrl of MODEL_URLS) {
+      try {
+        bodyModel = await cocoSsd.load({ base: "lite_mobilenet_v2", modelUrl });
+        const warm = document.createElement("canvas"); warm.width = warm.height = 64;
+        await bodyModel.detect(warm);   // 最初の1回の準備（ここが一番重い）
+        return true;
+      }
+      catch (e) { console.warn("全身モデルを読めません", modelUrl, e); }
+    }
+    return false;
+  })().catch(e => { console.warn(e); return false; });
+  return bodyReady;
+}
+/* 体が動画の端で切れている辺1つにつき減点 */
+function edgeCut(b, W, H) {
+  const e = 0.01 * Math.max(W, H);
+  const n = (b.x < e) + (b.y < e) + (b.x + b.w > W - e) + (b.y + b.h > H - e);
+  return Math.pow(0.85, n);
+}
+/* 顔のまわりが画面の端で切れていないか（顔の2.6倍の枠が画面に入る割合の2乗） */
+function faceFit(f, W, H) {
+  const s = f.w * 2.6, cx = f.x + f.w / 2, cy = f.y + f.h / 2 + f.w * 0.12;
+  const ix = Math.max(0, Math.min(W, cx + s / 2) - Math.max(0, cx - s / 2));
+  const iy = Math.max(0, Math.min(H, cy + s / 2) - Math.max(0, cy - s / 2));
+  return Math.pow(Math.min(1, (ix * iy) / (s * s)), 2);
+}
+/* 顔と体の位置関係のもっともらしさ。縦長の体の下の方にある「顔」はお尻や手の見まちがいが多い */
+function plausible(f, b) {
+  const fy = (f.y + f.h / 2 - b.y) / b.h;
+  return b.h > b.w * 1.2 && fy > 0.6 ? 0.25 : 1;
+}
+/* 顔を含む猫の枠（無ければ null） */
+async function findBody(canvas, f) {
+  if (!bodyModel || !f) return null;
+  const preds = await bodyModel.detect(canvas, 10, 0.25);
+  const cx = f.x + f.w / 2, cy = f.y + f.h / 2;
+  let best = null;
+  for (const p of preds) {
+    if (!["cat", "dog", "teddy bear"].includes(p.class)) continue;
+    const [x, y, w, h] = p.bbox, tol = f.w * 0.3;
+    if (cx < x - tol || cx > x + w + tol || cy < y - tol || cy > y + h + tol) continue;
+    const sc = p.score * (p.class === "cat" ? 1 : 0.7);
+    if (!best || sc > best.sc) best = { x, y, w, h, sc };
+  }
+  return best;
+}
+
+/* 1コマ分を調べて記録 */
+async function sampleFrame(t) {
+  detCtx.drawImage(vid, 0, 0, det.width, det.height);
+  const f = await detectFace(det);
+  if (!f) return false;
+  samples.push({ t, f, size: f.w / Math.min(det.width, det.height), fit: fitRatio(f, det.width, det.height), thumb: thumbOf(det, cropFor(f, det.width, det.height)) });
+  return true;
+}
+
+/* 速めに再生しながらコマを拾う（シークより速い）。再生速度は検出の重さに合わせて調整 */
+async function scan() {
+  scanning = true; stopReq = false; samples = [];
+  const dur = vid.duration, step = Math.max(0.2, dur / MAX_SAMPLES);
+  const W = vid.videoWidth, H = vid.videoHeight, k = Math.min(1, DET_LONG / Math.max(W, H));
+  det.width = Math.round(W * k); det.height = Math.round(H * k);
+  $("scanBox").hidden = false; $("stopScan").disabled = false;
+  $("scanLabel").textContent = "顔を探しています…";
+  const t0 = performance.now(); let n = 0, found = 0, next = 0, detMs = 150;
+  // かける時間の目安 = 動画の長さ（短い動画は15秒）。検出が遅い端末ではコマを間引く
+  const budget = Math.max(15, dur);
+  const stepNow = () => Math.max(step, dur * (detMs / 1000) / budget);
+  const show = t => {
+    $("scanBar").style.width = (100 * Math.min(1, t / dur)).toFixed(1) + "%";
+    $("stN").textContent = n; $("stF").textContent = found;
+    $("stT").textContent = ((performance.now() - t0) / 1000).toFixed(0);
+  };
+  await seek(0);
+  let playOk = false;
+  if (vid.requestVideoFrameCallback) {
+    let last = performance.now(), busy = false, pending = Promise.resolve();
+    vid.playbackRate = 2;
+    await new Promise(done => {
+      // 画面が隠れているとコマの通知が来ないので、止まったらシーク方式へ
+      const dog = setInterval(() => { if (performance.now() - last > 1500) { clearInterval(dog); done(); } }, 300);
+      const fin = () => { clearInterval(dog); playOk = true; done(); };
+      const onFrame = (now, meta) => {
+        last = performance.now();
+        if (stopReq || vid.ended) { fin(); return; }
+        const t = meta.mediaTime;
+        if (!busy && t >= next) {
+          busy = true;
+          const a = performance.now();
+          pending = sampleFrame(t).then(hit => {
+            if (hit) found++;
+            detMs = n ? detMs * 0.8 + (performance.now() - a) * 0.2 : performance.now() - a;
+            n++; next = t + stepNow();
+            // 1回の検出の間に進む動画の長さが1コマ分の間隔になる速度（0.25〜8倍）
+            if (!vid.paused) vid.playbackRate = Math.max(0.25, Math.min(8, stepNow() / (detMs / 1000 * 1.3)));
+            show(t);
+          }).catch(e => console.warn(e)).finally(() => { busy = false; });
+        }
+        vid.requestVideoFrameCallback(onFrame);
+      };
+      vid.addEventListener("ended", fin, { once: true });
+      vid.requestVideoFrameCallback(onFrame);
+      vid.play().catch(() => { clearInterval(dog); done(); });
+    });
+    vid.pause(); vid.playbackRate = 1;
+    await pending;
+  }
+  if (!playOk) {
+    for (let t = Math.max(0.05, next); t < dur && !stopReq; t += stepNow()) {
+      await seek(t);
+      const a = performance.now();
+      if (await sampleFrame(vid.currentTime)) found++;
+      detMs = n ? detMs * 0.8 + (performance.now() - a) * 0.2 : performance.now() - a;
+      n++; show(t);
+    }
+  }
+  show(dur);
+  $("scanBar").style.width = "100%";
+  $("scanLabel").textContent = stopReq ? "途中まで調べました" : "調べ終わりました";
+  $("stopScan").disabled = true;
+  const pool = rank(samples, dur, 30);
+  if (pool.length && !stopReq) await refineBodies(pool);
+  scanning = false;
+  showPick(finish(pool));
+}
+/* 上位のコマだけ全身の枠を取り、全身が枠に収まるかで点数を付け直す */
+async function refineBodies(pool) {
+  $("scanLabel").textContent = "全身を調べる準備中…（初回は少し時間がかかります）";
+  await sleep(60);   // 表示を先に描かせる
+  const ok = await Promise.race([loadBody(), sleep(30000).then(() => false)]);
+  $("scanLabel").textContent = "全身の位置を調べています…";
+  if (!ok) { $("scanLabel").textContent = "全身の検出が使えないため、顔から全身の位置を推定しました"; return; }
+  let i = 0;
+  for (const s of pool) {
+    if (stopReq) break;
+    await seek(s.t);
+    detCtx.drawImage(vid, 0, 0, det.width, det.height);
+    s.body = await findBody(det, s.f);
+    s.fit = fitRatio(s.f, det.width, det.height, s.body);
+    s.thumb = thumbOf(det, cropFor(s.f, det.width, det.height, s.body));
+    s.score = s.base * (0.6 + 0.4 * s.fit) * (s.body ? plausible(s.f, s.body) * edgeCut(s.body, det.width, det.height) : 0.8);
+    $("scanBar").style.width = (100 * ++i / pool.length).toFixed(0) + "%";
+  }
+  $("scanLabel").textContent = "調べ終わりました";
+}
+$("stopScan").onclick = () => { stopReq = true; };
+
+/* 点数 = 顔の大きさ × シャープさ × 検出の確かさ（2つの検出器の反応数）× 顔まわりの収まり × 全身が正方形に入るか（弱め）。
+   上位30コマは全身の枠を取り、体が動画の端で切れている・顔の位置がおかしい時に減点。近い時刻は1つにまとめる */
+function rank(list, dur, limit = TOP_K) {
+  if (!list.length) return [];
+  const sharps = list.map(s => s.f.sharp).sort((a, b) => a - b);
+  const ref = sharps[Math.floor(sharps.length * 0.9)] || 1;
+  for (const s of list) {
+    const size = Math.pow(Math.min(1, s.size / 0.35), 0.7);
+    const sharp = Math.min(1, s.f.sharp / ref);
+    s.base = size * (0.3 + 0.7 * sharp) * s.f.conf;
+    s.score = s.base * (0.6 + 0.4 * s.fit) * faceFit(s.f, det.width, det.height);
+  }
+  const gap = Math.max(1, dur / 40), picked = [];
+  for (const s of [...list].sort((a, b) => b.score - a.score)) {
+    if (picked.every(p => Math.abs(p.t - s.t) >= gap)) picked.push(s);
+    if (picked.length >= limit) break;
+  }
+  return picked;
+}
+function finish(pool) {
+  const picked = [...pool].sort((a, b) => b.score - a.score).slice(0, TOP_K);
+  const top = (picked[0] && picked[0].score) || 1;
+  picked.forEach(p => { p.pts = Math.round(100 * p.score / top); });
+  return picked;
+}
+
+function showPick(list) {
+  const g = $("grid"); g.innerHTML = "";
+  $("pickNote").textContent = list.length ? "点数の高い順。タップで仕上げへ" : "猫の顔が見つかりませんでした。下の「自分で探す」で選んでください。";
+  if (!list.length) g.parentElement.querySelector("details").open = true;
+  for (const s of list) {
+    const b = document.createElement("button");
+    b.className = "pick"; b.title = s.t.toFixed(2) + " 秒";
+    b.innerHTML = `<img alt="" src="${s.thumb}"><span>${s.t.toFixed(1)}秒</span><em>${s.pts}</em>`;
+    b.onclick = () => { g.querySelectorAll(".pick").forEach(x => x.classList.remove("on")); b.classList.add("on"); openEditor(s.t, null); };
+    g.appendChild(b);
+  }
+  $("stepPick").hidden = false;
+}
+
+/* ---------- 自分で探す ---------- */
+const scrubView = $("scrubView");
+let scrubBusy = false, scrubWant = null;
+$("scrub").addEventListener("input", async () => {
+  scrubWant = $("scrub").value / 1000 * vid.duration;
+  $("scrubT").textContent = scrubWant.toFixed(1) + " 秒";
+  if (scrubBusy) return;
+  scrubBusy = true;
+  while (scrubWant !== null) {
+    const t = scrubWant; scrubWant = null;
+    await seek(t);
+    scrubView.width = 480; scrubView.height = Math.round(480 * vid.videoHeight / vid.videoWidth);
+    scrubView.getContext("2d").drawImage(vid, 0, 0, scrubView.width, scrubView.height);
+  }
+  scrubBusy = false;
+});
+$("useScrub").onclick = () => openEditor($("scrub").value / 1000 * vid.duration, null);
+
+/* ---------- 仕上げ ---------- */
+async function grabFrame(t) {
+  await seek(t);
+  srcT = vid.currentTime;
+  srcOrig.width = vid.videoWidth; srcOrig.height = vid.videoHeight;
+  srcOrig.getContext("2d", { willReadFrequently: true }).drawImage(vid, 0, 0);
+  autoToken++; srcAuto = null; autoSpots = [];
+  setVer("orig");
+  $("editT").textContent = srcT.toFixed(2) + " 秒";
+}
+/* 仕上げ用のコマで顔と全身を取り直す（元画像の座標で face / body に入れる） */
+async function findCat() {
+  if (!cvOk) { face = body = null; return; }
+  const k = Math.min(1, DET_LONG / Math.max(src.width, src.height)), sc = r => r && { x: r.x / k, y: r.y / k, w: r.w / k, h: r.h / k };
+  det.width = Math.round(src.width * k); det.height = Math.round(src.height * k);
+  detCtx.drawImage(src, 0, 0, det.width, det.height);
+  const f = await detectFace(det);
+  face = sc(f);
+  body = f ? sc(await findBody(det, f)) : null;
+}
+const bandNow = () => $("nameOn").checked ? BAND[sizeKey] : 0;
+function defaultCrop() {
+  const W = src.width, H = src.height;
+  return face ? cropFor(face, W, H, body, bandNow()) : clampCrop({ cx: W / 2, cy: H / 2, side: Math.min(W, H) * 0.9 }, W, H);
+}
+async function openEditor(t) {
+  await grabFrame(t);
+  await findCat();
+  crop = defaultCrop();
+  $("stepEdit").hidden = false;
+  syncZoom(); draw();
+  $("stepEdit").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  runAuto();
+}
+async function stepFrame(d) {
+  if (undoStack.length) toast("コマを送ったので、消した跡はリセットされました");
+  await grabFrame(srcT + d);
+  const f = face, b = body;
+  await findCat(); face = face || f; body = body || b;
+  draw();
+  runAuto();
+}
+$("fPrev").onclick = () => stepFrame(-FRAME);
+$("fNext").onclick = () => stepFrame(FRAME);
+$("fitBody").onclick = async () => { const f = face, b = body; await findCat(); face = face || f; body = body || b; crop = defaultCrop(); syncZoom(); draw(); };
+$("fitFace").onclick = async () => { if (!face) await findCat(); if (!face) { toast("顔が見つかりません。枠を手で動かしてください"); return; } crop = faceCrop(face, src.width, src.height); syncZoom(); draw(); };
+$("back").onclick = () => $("stepPick").scrollIntoView({ block: "start" });
+
+/* ---------- 自動レタッチ（猫のうしろの服・ソファ・床などのシミ） ----------
+   1) 猫のまわりの輪から「面」（服など）の色を取る
+   2) 周り（メディアンぼかし）との色の差が大きい小さな斑点を探す
+   3) 面に囲まれていて、猫・手・顔に触れない斑点だけを inpaint で埋める
+   しわ（明るさだけ違う・細長い）や柄は残るように、色の差・形・大きさで絞る */
+/* 調整値：thrK＝ばらつきの何倍から候補か、strength＝斑点の平均の色の差の下限、protect＝猫・手のまわりの守る幅(px) */
+const AUTO = { thrK: 6, minThr: 12, strength: 0, peak: 0, chroma: 10, protect: 11, medK: 0.07 };
+/* 自動レタッチを作業役に頼む。{ skip } / { spots, canvas } を返す */
+async function retouchCanvas(c, f, b) {
+  const img = c.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
+  const r = await cvCall("retouch", { img, face: f, cb: catBox(f, b), auto: AUTO }, [img.data.buffer]);
+  if (r.data) {
+    const oc = document.createElement("canvas"); oc.width = c.width; oc.height = c.height;
+    oc.getContext("2d", { willReadFrequently: true }).putImageData(new ImageData(new Uint8ClampedArray(r.data), c.width, c.height), 0, 0);
+    r.canvas = oc; delete r.data;
+  }
+  return r;
 }
 async function runAuto() {
   const token = ++autoToken;
@@ -743,10 +807,10 @@ async function runAuto() {
   $("autoNote").textContent = "シミを探しています…";
   await sleep(40);   // 先に画面を描かせる
   if (token !== autoToken) return;
-  if (!cv || !face) { $("autoNote").textContent = "猫の顔が見つからないので、自動修正はしていません（指で消せます）"; return; }
+  if (!cvOk || !face) { $("autoNote").textContent = "猫の顔が見つからないので、自動修正はしていません（指で消せます）"; return; }
   let r;
   const t0 = performance.now();
-  try { r = autoRetouch(srcOrig, face, body); } catch (e) { console.warn(e); r = { error: true }; }
+  try { r = await retouchCanvas(srcOrig, face, body); } catch (e) { console.warn(e); r = { error: true }; }
   if (token !== autoToken) return;
   const ms = Math.round(performance.now() - t0);
   if (r.error) { $("autoNote").textContent = "自動修正でエラーが起きました（指で消せます）"; return; }
@@ -887,8 +951,8 @@ function drawBrushOverlay() {
   }
 }
 /* なぞった所を周りの色で埋める（OpenCV inpaint・Telea 法）。作業は筆跡の周りの四角だけ */
-function inpaintStroke(st) {
-  if (!cv) { toast("消す機能の準備ができていません"); return; }
+async function inpaintStroke(st) {
+  if (!cvOk) { toast("消す機能の準備ができていません"); return; }
   const pad = st.r * 3;
   const xs = st.pts.map(p => p.x), ys = st.pts.map(p => p.y);
   const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad)), y0 = Math.max(0, Math.floor(Math.min(...ys) - pad));
@@ -900,17 +964,13 @@ function inpaintStroke(st) {
   const mc = document.createElement("canvas"); mc.width = w; mc.height = h;
   const mctx = mc.getContext("2d"); mctx.fillStyle = "#000"; mctx.fillRect(0, 0, w, h);
   mctx.strokeStyle = "#fff"; strokePath(mctx, st, x0, y0, 1);
-  const rgba = cv.matFromImageData(before), rgb = new cv.Mat(), dst = new cv.Mat(), m4 = cv.imread(mc), mask = new cv.Mat(), outRgba = new cv.Mat();
-  cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
-  cv.cvtColor(m4, mask, cv.COLOR_RGBA2GRAY);
-  cv.threshold(mask, mask, 127, 255, cv.THRESH_BINARY);
-  cv.inpaint(rgb, mask, dst, Math.max(3, Math.min(12, st.r * 0.4)), cv.INPAINT_TELEA);
-  cv.cvtColor(dst, outRgba, cv.COLOR_RGB2RGBA);
-  sctx.putImageData(new ImageData(new Uint8ClampedArray(outRgba.data), w, h), x0, y0);
-  [rgba, rgb, dst, m4, mask, outRgba].forEach(x => x.delete());
+  const mask = mctx.getImageData(0, 0, w, h);
+  const res = await cvCall("inpaint", { img: before, mask, radius: Math.max(3, Math.min(12, st.r * 0.4)) }, [mask.data.buffer]);
+  sctx.putImageData(new ImageData(new Uint8ClampedArray(res), w, h), x0, y0);
   undoStack.push({ x: x0, y: y0, data: before });
   if (undoStack.length > 20) undoStack.shift();
   $("undo").disabled = false;
+  draw();
 }
 $("undo").onclick = () => {
   const u = undoStack.pop(); if (!u) return;
@@ -965,8 +1025,9 @@ if (document.fonts) document.fonts.load('700 80px "Zen Maru Gothic"', "猫ねこ
 
 /* 保存 */
 function toast(text) { const t = document.createElement("div"); t.className = "toast"; t.textContent = text; document.body.appendChild(t); setTimeout(() => t.remove(), 2200); }
-$("save").onclick = async () => {
-  const keep = mode; mode = "move"; saving = true; draw();   // 筆のカーソルと印を写さない
+/* 保存する画像とファイル名を作る（筆のカーソルと印は写さない） */
+async function makeJpeg() {
+  const keep = mode; mode = "move"; saving = true; draw();
   const name = $("nameOn").checked ? $("name").value.trim() : "";
   if (name) saveRecent(name, sex);
   const safe = s => s.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40);
@@ -974,18 +1035,33 @@ $("save").onclick = async () => {
   const filename = `${safe(name || "neko")}${tag}_${safe(videoName)}_${srcT.toFixed(2)}s.jpg`;
   const blob = await new Promise(r => out.toBlob(r, "image/jpeg", 0.9));
   mode = keep; saving = false; draw();
+  return { blob, filename };
+}
+/* 保存：端末に保存するだけ（Android＝ダウンロード、iPhone＝ファイル App のダウンロード、claude.ai 上は確認のあと保存） */
+$("save").onclick = async () => {
+  const { blob, filename } = await makeJpeg();
   try {
     if (downloads) await downloads.save({ filename, data: blob });
     else {
-      const file = new File([blob], filename, { type: "image/jpeg" });
-      if (/Android|iPhone|iPad/i.test(navigator.userAgent) && navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
-      else { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     }
     savedCount++; $("savedN").textContent = savedCount; toast("保存しました：" + filename);
   } catch (e) {
-    if (e && (e.code === "declined" || e.name === "AbortError")) return;
+    if (e && e.code === "declined") return;
     toast("保存できませんでした" + (e && e.message ? "：" + e.message : ""));
   }
+};
+/* 共有：スマホの共有メニュー（LINE・写真に保存など）。使える端末だけボタンを出す */
+function canShareFiles() {
+  try { return !!(navigator.canShare && navigator.canShare({ files: [new File([new Blob(["x"])], "a.jpg", { type: "image/jpeg" })] })); } catch { return false; }
+}
+$("share").hidden = !canShareFiles();
+$("share").onclick = async () => {
+  const { blob, filename } = await makeJpeg();
+  try { await navigator.share({ files: [new File([blob], filename, { type: "image/jpeg" })] }); }
+  catch (e) { if (e && e.name !== "AbortError") toast("共有できませんでした：" + e.message); }
 };
 </script>
 
