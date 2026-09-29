@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ねこ顔きりぬき</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&display=swap">
+<style>
+/* Layout: one narrow column of three steps (動画 → 候補 → 仕上げ); the editor canvas is the only large element. */
+:root{
+  --bg:#fbf6f0; --surface:#ffffff; --ink:#2a2019; --mute:#7a695b; --line:#eadbcb;
+  --accent:#e0730f; --accent-ink:#ffffff; --accent-soft:#fbe4cc; --ok:#2f8a52; --bad:#c23b22;
+  --display:"Zen Maru Gothic","Hiragino Maru Gothic ProN","BIZ UDPGothic","Yu Gothic UI",sans-serif;
+  --body:system-ui,-apple-system,"Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
+  --radius:14px;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#17110c; --surface:#211912; --ink:#f4eae0; --mute:#a99583; --line:#3b2d21;
+  --accent:#f5953a; --accent-ink:#1c1108; --accent-soft:#3d2714; --ok:#5cc07e; --bad:#ef765f; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#17110c; --surface:#211912; --ink:#f4eae0; --mute:#a99583; --line:#3b2d21;
+  --accent:#f5953a; --accent-ink:#1c1108; --accent-soft:#3d2714; --ok:#5cc07e; --bad:#ef765f; color-scheme:dark }
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--body);padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding-top:18px}
+header h1{font:700 22px/1.2 var(--display);margin:0;letter-spacing:.02em}
+header h1 b{color:var(--accent)}
+header small{color:var(--mute);font-size:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.step{display:flex;align-items:center;gap:8px;font:700 15px var(--display)}
+.step i{font-style:normal;display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-size:12px}
+.muted{color:var(--mute);font-size:13px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,.btn{font:600 14px var(--body);border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:9px 14px;cursor:pointer;min-height:40px}
+button:hover{border-color:var(--accent)}
+button:focus-visible,input:focus-visible,.pick:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+button:disabled{opacity:.45;cursor:default}
+.drop{display:flex;flex-direction:column;align-items:center;gap:6px;border:2px dashed var(--line);border-radius:var(--radius);padding:22px 12px;text-align:center;cursor:pointer}
+.drop.over{border-color:var(--accent);background:var(--accent-soft)}
+.drop strong{font:700 16px var(--display)}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.stats{display:flex;gap:16px;flex-wrap:wrap;font-variant-numeric:tabular-nums;font-size:13px;color:var(--mute)}
+.stats b{color:var(--ink);font-size:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px}
+.pick{position:relative;border:2px solid transparent;border-radius:10px;overflow:hidden;padding:0;min-height:0;background:var(--line);aspect-ratio:1;max-width:100%}
+.pick img{display:block;width:100%;height:100%;object-fit:cover}
+.pick span{position:absolute;left:4px;bottom:4px;font:600 11px var(--body);background:rgba(0,0,0,.6);color:#fff;border-radius:6px;padding:0 5px;font-variant-numeric:tabular-nums}
+.pick em{position:absolute;right:4px;top:4px;font:700 11px var(--body);font-style:normal;background:var(--accent);color:var(--accent-ink);border-radius:6px;padding:0 5px;font-variant-numeric:tabular-nums}
+.pick.on{border-color:var(--accent)}
+.stage{position:relative;width:100%;max-width:100%;aspect-ratio:1;border-radius:10px;overflow:hidden;background:var(--line);touch-action:none;user-select:none}
+.stage canvas{display:block;width:100%;height:100%;cursor:grab}
+.stage canvas:active{cursor:grabbing}
+.stage.brush canvas{cursor:crosshair}
+.hint{position:absolute;right:8px;top:8px;font-size:11px;background:rgba(0,0,0,.55);color:#fff;border-radius:6px;padding:1px 6px;pointer-events:none}
+label.f{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mute);min-width:0}
+input[type=text]{font:500 16px var(--body);padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);width:100%}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{border:none;border-radius:0;min-height:36px;padding:6px 12px}
+.seg button.on{background:var(--accent-soft);color:var(--ink)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chips button{min-height:30px;padding:3px 10px;border-radius:99px;font-size:13px}
+.switch{display:flex;align-items:center;gap:8px;font-weight:600}
+.switch input{width:20px;height:20px;accent-color:var(--accent)}
+.msg{border-radius:10px;padding:10px 12px;font-size:14px;background:var(--accent-soft)}
+.msg.bad{background:color-mix(in srgb,var(--bad) 14%,var(--surface));border:1px solid var(--bad)}
+.msg ul{margin:6px 0 0;padding-left:20px}
+.tabular{font-variant-numeric:tabular-nums}
+video.src{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+.toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 16px;border-radius:99px;font-size:14px;z-index:9}
+@media (prefers-reduced-motion: reduce){ .bar i{transition:none} }
+</style>
+
+<div class="wrap">
+  <header><h1>ねこ顔<b>きりぬき</b></h1><small id="cvState">検出の準備中…</small></header>
+
+  <section class="card" id="stepVideo">
+    <div class="step"><i>1</i>動画を選ぶ</div>
+    <label class="drop" id="drop" for="file">
+      <strong>猫の動画を選ぶ</strong>
+      <span class="muted">スマホ・PCの動画（MP4 / MOV）。動画は端末の中だけで処理し、送信しません</span>
+    </label>
+    <input type="file" id="file" accept="video/*">
+    <div id="videoMsg" hidden></div>
+    <div id="scanBox" hidden>
+      <div class="row" style="justify-content:space-between"><span id="scanLabel" class="muted">顔を探しています…</span><button id="stopScan">ここまでで候補を見る</button></div>
+      <div class="bar"><i id="scanBar"></i></div>
+      <div class="stats"><span>調べたコマ <b id="stN">0</b></span><span>顔あり <b id="stF">0</b></span><span>かかった時間 <b id="stT">0</b> 秒</span></div>
+    </div>
+  </section>
+
+  <section class="card" id="stepPick" hidden>
+    <div class="step"><i>2</i>コマを選ぶ</div>
+    <div class="muted" id="pickNote">点数の高い順。タップで仕上げへ</div>
+    <div class="grid" id="grid"></div>
+    <details>
+      <summary class="muted" style="cursor:pointer">候補に無いときは、自分で探す</summary>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+        <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="動画の位置">
+        <div class="row" style="justify-content:space-between"><span class="muted tabular" id="scrubT">0.0 秒</span><button id="useScrub" class="primary">このコマで切り抜く</button></div>
+        <canvas id="scrubView" width="480" height="270" style="width:100%;border-radius:10px;background:var(--line)"></canvas>
+      </div>
+    </details>
+  </section>
+
+  <section class="card" id="stepEdit" hidden>
+    <div class="step"><i>3</i>仕上げ <span class="muted tabular" id="editT"></span></div>
+    <div class="stage" id="stage"><canvas id="out" width="800" height="800"></canvas><span class="hint" id="hint">ドラッグで移動・ピンチで拡大</span></div>
+    <div class="row">
+      <button id="fPrev" title="1コマ戻る">◀ 1コマ</button>
+      <button id="fNext" title="1コマ進む">1コマ ▶</button>
+      <button id="refit">顔に合わせる</button>
+    </div>
+    <div class="muted tabular" id="resNote"></div>
+    <label class="f"><span class="row" style="justify-content:space-between"><span>← 広く</span><span>寄る →</span></span><input type="range" id="zoom" min="0" max="1000" value="500" aria-label="切り抜きの大きさ"></label>
+    <div class="row">
+      <div class="seg" id="mode"><button data-v="move" class="on">枠を動かす</button><button data-v="brush">汚れを消す</button></div>
+      <button id="undo" disabled>1つ戻す</button>
+    </div>
+    <label class="f" id="brushBox" hidden>筆の太さ<input type="range" id="brush" min="8" max="90" value="30"></label>
+    <label class="switch"><input type="checkbox" id="nameOn">名前を入れる</label>
+    <div id="nameBox" hidden style="display:flex;flex-direction:column;gap:8px">
+      <input type="text" id="name" placeholder="例：マーマレード" maxlength="24" autocomplete="off">
+      <div class="chips" id="recent"></div>
+      <div class="row"><span class="muted">文字の大きさ</span><div class="seg" id="size"><button data-v="s">小</button><button data-v="m" class="on">中</button><button data-v="l">大</button></div></div>
+    </div>
+    <div class="row">
+      <button class="primary" id="save">JPEGで保存（800×800）</button>
+      <button id="back">候補に戻る</button>
+      <span class="muted tabular">保存 <b id="savedN">0</b> 枚</span>
+    </div>
+  </section>
+</div>
+<video class="src" id="vid" muted playsinline preload="auto"></video>
+
+<script src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js" async id="cvScript"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const OUT = 800, FRAME = 1 / 30, DET_LONG = 480, MAX_SAMPLES = 300, TOP_K = 18;
+const vid = $("vid");
+let cv = null, classifier = null, verifier = null, cvReady = null;
+let videoName = "", scanning = false, stopReq = false, samples = [];
+let src = document.createElement("canvas"), srcT = 0, face = null, crop = null;
+let savedCount = 0, sizeKey = "m", downloads;
+
+/* ---------- OpenCV + 猫顔検出器 ---------- */
+cvReady = new Promise((resolve, reject) => {
+  const s = $("cvScript");
+  const init = async () => {
+    try {
+      let c = window.cv;
+      if (c instanceof Promise) c = await c;
+      else if (!c.Mat) await new Promise(r => { c.onRuntimeInitialized = r; });
+      // 主：extended、確認用：標準（2つが同じ所を顔と見たら確か）
+      const load = async (file) => {
+        const res = await fetch(file);
+        if (!res.ok) throw new Error("猫顔検出器のファイルが読めません");
+        c.FS_createDataFile("/", file, new Uint8Array(await res.arrayBuffer()), true, false, false);
+        const cl = new c.CascadeClassifier();
+        if (!cl.load(file)) throw new Error("猫顔検出器を読み込めません");
+        return cl;
+      };
+      const [cl, vf] = await Promise.all([load("haarcascade_frontalcatface_extended.xml"), load("haarcascade_frontalcatface.xml")]);
+      cv = c; classifier = cl; verifier = vf;
+      $("cvState").textContent = "猫顔検出 OK";
+      resolve();
+    } catch (e) { $("cvState").textContent = "検出が使えません（手動で探せます）"; reject(e); }
+  };
+  if (window.cv) init(); else { s.addEventListener("load", init); s.addEventListener("error", () => { $("cvState").textContent = "検出が使えません（手動で探せます）"; reject(new Error("opencv.js load failed")); }); }
+});
+cvReady.catch(e => console.warn(e));
+
+/* claude.ai 上では downloads 機能、それ以外は通常のダウンロード／共有 */
+if (window.claude && window.claude.use) window.claude.use("downloads").then(d => { downloads = d; }).catch(() => {});
+
+/* ---------- 動画の読み込み ---------- */
+const drop = $("drop");
+$("file").addEventListener("change", e => { const f = e.target.files[0]; if (f) openVideo(f); e.target.value = ""; });
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) openVideo(f); });
+
+function showVideoMsg(html, bad) { const m = $("videoMsg"); m.className = "msg" + (bad ? " bad" : ""); m.innerHTML = html; m.hidden = !html; }
+
+const HEVC_HELP = `この動画はこのブラウザでは開けませんでした。iPhoneの動画（HEVC形式）は、Windowsのブラウザでは開けないことがあります。
+<ul><li>スマホのブラウザでこのページを開いて、そこで動画を選ぶ</li>
+<li>iPhoneの「設定 → カメラ → フォーマット」を「互換性優先」にして撮る</li>
+<li>Windowsに「HEVCビデオ拡張機能」を入れて、Edgeで開く</li></ul>`;
+
+async function openVideo(file) {
+  stopReq = true;
+  while (scanning) await sleep(30);
+  videoName = file.name.replace(/\.[^.]+$/, "");
+  $("stepPick").hidden = true; $("stepEdit").hidden = true; showVideoMsg("");
+  if (vid.src) URL.revokeObjectURL(vid.src);
+  vid.src = URL.createObjectURL(file);
+  vid.load();
+  vid.play().then(() => vid.pause()).catch(() => {});   // iOS で最初のコマを描けるようにする
+  const ok = await new Promise(res => {
+    const t = setTimeout(() => res(false), 15000);
+    vid.onloadeddata = () => { clearTimeout(t); res(vid.videoWidth > 0); };
+    vid.onerror = () => { clearTimeout(t); res(false); };
+  });
+  vid.onloadeddata = vid.onerror = null;
+  if (!ok) { showVideoMsg(HEVC_HELP, true); return; }
+  vid.pause();
+  $("scrub").value = 0;
+  try { await cvReady; } catch {
+    showVideoMsg("猫顔の自動検出が使えないため、下の「自分で探す」でコマを選んでください。", true);
+    showPick([]); return;
+  }
+  scan();
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function seek(t) {
+  t = Math.max(0, Math.min(t, (vid.duration || 0) - 0.001));
+  return new Promise(res => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; clearTimeout(to); res(); } };
+    const to = setTimeout(fin, 3000);
+    vid.addEventListener("seeked", () => {
+      if (vid.requestVideoFrameCallback && document.visibilityState === "visible") { vid.requestVideoFrameCallback(fin); setTimeout(fin, 120); } else fin();
+    }, { once: true });
+    vid.currentTime = t;
+  });
+}
+
+/* ---------- 候補出し ---------- */
+const det = document.createElement("canvas");
+const detCtx = det.getContext("2d", { willReadFrequently: true });
+
+function iou(a, b) {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  return ix * iy / (a.w * a.h + b.w * b.h - ix * iy);
+}
+function cascade(cl, mat, minPx) {
+  const faces = new cv.RectVector(), nums = new cv.IntVector(), out = [];
+  try { cl.detectMultiScale2(mat, faces, nums, 1.08, 3, 0, new cv.Size(minPx, minPx), new cv.Size(0, 0)); }
+  catch { cl.detectMultiScale(mat, faces, 1.08, 3, 0, new cv.Size(minPx, minPx), new cv.Size(0, 0)); }
+  for (let i = 0; i < faces.size(); i++) { const r = faces.get(i); out.push({ x: r.x, y: r.y, w: r.width, h: r.height, n: nums.size() ? nums.get(i) : 5 }); }
+  faces.delete(); nums.delete();
+  return out;
+}
+/* 猫の顔を1つ探す。首をかしげた顔用に ±22° 回した画像でも探す。
+   主の検出器で見つけた所を確認用の検出器で見直し、両方が顔と見た所か、主が強く反応した所（n≥12）だけ採用 */
+const ANGLES = [0, -22, 22];
+function detectOn(canvas) {
+  const img = cv.imread(canvas), gray = new cv.Mat();
+  cv.cvtColor(img, gray, cv.COLOR_RGBA2GRAY);
+  cv.equalizeHist(gray, gray);
+  const W = gray.cols, H = gray.rows, minPx = Math.round(Math.min(W, H) * 0.08);
+  let best = null;
+  for (const ang of ANGLES) {
+    let g = gray, M = null;
+    if (ang) {
+      M = cv.getRotationMatrix2D(new cv.Point(W / 2, H / 2), ang, 1);
+      g = new cv.Mat();
+      cv.warpAffine(gray, g, M, new cv.Size(W, H), cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar());
+    }
+    for (const r of cascade(classifier, g, minPx)) {
+      const pad = Math.round(r.w * 0.3), X0 = Math.max(0, r.x - pad), Y0 = Math.max(0, r.y - pad);
+      const X1 = Math.min(W, r.x + r.w + pad), Y1 = Math.min(H, r.y + r.h + pad);
+      const roi = g.roi(new cv.Rect(X0, Y0, X1 - X0, Y1 - Y0));
+      let nV = 0, agree = false;
+      for (const v of cascade(verifier, roi, Math.round(r.w * 0.6))) {
+        if (iou(r, { x: v.x + X0, y: v.y + Y0, w: v.w, h: v.h }) > 0.3) { agree = true; nV = Math.max(nV, v.n); }
+      }
+      roi.delete();
+      if (!agree && r.n < 12) continue;
+      const n = r.n + nV, conf = Math.min(1, n / 30) * (ang ? 0.85 : 1);
+      if (best && r.w * conf <= best.w * best.conf) continue;
+      // 顔の中のシャープさ（ラプラシアンの分散）
+      const fr = g.roi(new cv.Rect(r.x, r.y, r.w, r.h)), small = new cv.Mat(), lap = new cv.Mat(), mean = new cv.Mat(), sd = new cv.Mat();
+      cv.resize(fr, small, new cv.Size(96, 96), 0, 0, cv.INTER_AREA);
+      cv.Laplacian(small, lap, cv.CV_64F);
+      cv.meanStdDev(lap, mean, sd);
+      const sharp = sd.data64F[0] ** 2;
+      [fr, small, lap, mean, sd].forEach(x => x.delete());
+      // 回した画像での顔の中心を元の画像へ戻す
+      let cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      if (M) {
+        const m = M.data64F, dx = cx - m[2], dy = cy - m[5], det = m[0] * m[4] - m[1] * m[3];
+        [cx, cy] = [(m[4] * dx - m[1] * dy) / det, (-m[3] * dx + m[0] * dy) / det];
+      }
+      best = { x: cx - r.w / 2, y: cy - r.h / 2, w: r.w, h: r.h, n, conf, sharp, angle: ang };
+    }
+    if (M) { M.delete(); g.delete(); }
+    if (best && !ang && best.n >= 20) break;   // 正面で十分はっきり見つかれば回さない
+  }
+  img.delete(); gray.delete();
+  return best;
+}
+
+/* 切り抜きの初期枠：顔の約2.6倍の正方形、少し下寄せ（胸元まで入れる） */
+function cropFor(f, W, H) {
+  const side = Math.min(f.w * 2.6, W, H);
+  return clampCrop({ cx: f.x + f.w / 2, cy: f.y + f.h / 2 + f.w * 0.12, side }, W, H);
+}
+function clampCrop(c, W, H) {
+  const side = Math.max(32, Math.min(c.side, W, H));
+  return { side, cx: Math.min(Math.max(c.cx, side / 2), W - side / 2), cy: Math.min(Math.max(c.cy, side / 2), H - side / 2) };
+}
+/* 枠が画面からはみ出す割合（1 = 全部入る） */
+function fitRatio(f, W, H) {
+  const s = f.w * 2.6, cx = f.x + f.w / 2, cy = f.y + f.h / 2 + f.w * 0.12;
+  const ix = Math.max(0, Math.min(W, cx + s / 2) - Math.max(0, cx - s / 2));
+  const iy = Math.max(0, Math.min(H, cy + s / 2) - Math.max(0, cy - s / 2));
+  return Math.min(1, (ix * iy) / (s * s));
+}
+
+/* 1コマ分を調べて記録 */
+function sampleFrame(t) {
+  detCtx.drawImage(vid, 0, 0, det.width, det.height);
+  const f = detectOn(det);
+  if (!f) return false;
+  const c = cropFor(f, det.width, det.height), th = document.createElement("canvas");
+  th.width = th.height = 160;
+  th.getContext("2d").drawImage(det, c.cx - c.side / 2, c.cy - c.side / 2, c.side, c.side, 0, 0, 160, 160);
+  samples.push({ t, f, size: f.w / Math.min(det.width, det.height), fit: fitRatio(f, det.width, det.height), thumb: th.toDataURL("image/jpeg", 0.75) });
+  return true;
+}
+
+/* 速めに再生しながらコマを拾う（シークより速い）。再生速度は検出の重さに合わせて調整 */
+async function scan() {
+  scanning = true; stopReq = false; samples = [];
+  const dur = vid.duration, step = Math.max(0.2, dur / MAX_SAMPLES);
+  const W = vid.videoWidth, H = vid.videoHeight, k = Math.min(1, DET_LONG / Math.max(W, H));
+  det.width = Math.round(W * k); det.height = Math.round(H * k);
+  $("scanBox").hidden = false; $("stopScan").disabled = false;
+  $("scanLabel").textContent = "顔を探しています…";
+  const t0 = performance.now(); let n = 0, found = 0, next = 0, detMs = 150;
+  // かける時間の目安 = 動画の長さ（短い動画は15秒）。検出が遅い端末ではコマを間引く
+  const budget = Math.max(15, dur);
+  const stepNow = () => Math.max(step, dur * (detMs / 1000) / budget);
+  const show = t => {
+    $("scanBar").style.width = (100 * Math.min(1, t / dur)).toFixed(1) + "%";
+    $("stN").textContent = n; $("stF").textContent = found;
+    $("stT").textContent = ((performance.now() - t0) / 1000).toFixed(0);
+  };
+  await seek(0);
+  let playOk = false;
+  if (vid.requestVideoFrameCallback) {
+    let last = performance.now();
+    vid.playbackRate = 2;
+    await new Promise(done => {
+      // 画面が隠れているとコマの通知が来ないので、止まったらシーク方式へ
+      const dog = setInterval(() => { if (performance.now() - last > 1500) { clearInterval(dog); done(); } }, 300);
+      const fin = () => { clearInterval(dog); playOk = true; done(); };
+      const onFrame = (now, meta) => {
+        last = performance.now();
+        if (stopReq || vid.ended) { fin(); return; }
+        const t = meta.mediaTime;
+        if (t >= next) {
+          const a = performance.now();
+          if (sampleFrame(t)) found++;
+          detMs = n ? detMs * 0.8 + (performance.now() - a) * 0.2 : performance.now() - a;
+          n++; next = t + stepNow();
+          // 1回の検出の間に進む動画の長さが1コマ分の間隔になる速度（0.25〜8倍）
+          vid.playbackRate = Math.max(0.25, Math.min(8, stepNow() / (detMs / 1000 * 1.3)));
+          show(t);
+        }
+        vid.requestVideoFrameCallback(onFrame);
+      };
+      vid.addEventListener("ended", fin, { once: true });
+      vid.requestVideoFrameCallback(onFrame);
+      vid.play().catch(() => { clearInterval(dog); done(); });
+    });
+    vid.pause(); vid.playbackRate = 1;
+  }
+  if (!playOk) {
+    for (let t = Math.max(0.05, next); t < dur && !stopReq; t += stepNow()) {
+      await seek(t);
+      const a = performance.now();
+      if (sampleFrame(vid.currentTime)) found++;
+      detMs = n ? detMs * 0.8 + (performance.now() - a) * 0.2 : performance.now() - a;
+      n++; show(t);
+    }
+  }
+  show(dur);
+  $("scanBar").style.width = "100%";
+  $("scanLabel").textContent = stopReq ? "途中まで調べました" : "調べ終わりました";
+  $("stopScan").disabled = true;
+  scanning = false;
+  showPick(rank(samples, dur));
+}
+$("stopScan").onclick = () => { stopReq = true; };
+
+/* 点数 = 大きさ × シャープさ × 検出の確かさ（2つの検出器の反応数）× 枠の収まり。近い時刻は1つにまとめる */
+function rank(list, dur) {
+  if (!list.length) return [];
+  const sharps = list.map(s => s.f.sharp).sort((a, b) => a - b);
+  const ref = sharps[Math.floor(sharps.length * 0.9)] || 1;
+  for (const s of list) {
+    const size = Math.pow(Math.min(1, s.size / 0.35), 0.7);
+    const sharp = Math.min(1, s.f.sharp / ref);
+    s.score = size * (0.3 + 0.7 * sharp) * s.f.conf * Math.pow(s.fit, 2);
+  }
+  const gap = Math.max(1, dur / 40), picked = [];
+  for (const s of [...list].sort((a, b) => b.score - a.score)) {
+    if (picked.every(p => Math.abs(p.t - s.t) >= gap)) picked.push(s);
+    if (picked.length >= TOP_K) break;
+  }
+  const top = picked[0].score || 1;
+  picked.forEach(p => { p.pts = Math.round(100 * p.score / top); });
+  return picked;
+}
+
+function showPick(list) {
+  const g = $("grid"); g.innerHTML = "";
+  $("pickNote").textContent = list.length ? "点数の高い順。タップで仕上げへ" : "猫の顔が見つかりませんでした。下の「自分で探す」で選んでください。";
+  if (!list.length) g.parentElement.querySelector("details").open = true;
+  for (const s of list) {
+    const b = document.createElement("button");
+    b.className = "pick"; b.title = s.t.toFixed(2) + " 秒";
+    b.innerHTML = `<img alt="" src="${s.thumb}"><span>${s.t.toFixed(1)}秒</span><em>${s.pts}</em>`;
+    b.onclick = () => { g.querySelectorAll(".pick").forEach(x => x.classList.remove("on")); b.classList.add("on"); openEditor(s.t, null); };
+    g.appendChild(b);
+  }
+  $("stepPick").hidden = false;
+}
+
+/* ---------- 自分で探す ---------- */
+const scrubView = $("scrubView");
+let scrubBusy = false, scrubWant = null;
+$("scrub").addEventListener("input", async () => {
+  scrubWant = $("scrub").value / 1000 * vid.duration;
+  $("scrubT").textContent = scrubWant.toFixed(1) + " 秒";
+  if (scrubBusy) return;
+  scrubBusy = true;
+  while (scrubWant !== null) {
+    const t = scrubWant; scrubWant = null;
+    await seek(t);
+    scrubView.width = 480; scrubView.height = Math.round(480 * vid.videoHeight / vid.videoWidth);
+    scrubView.getContext("2d").drawImage(vid, 0, 0, scrubView.width, scrubView.height);
+  }
+  scrubBusy = false;
+});
+$("useScrub").onclick = () => openEditor($("scrub").value / 1000 * vid.duration, null);
+
+/* ---------- 仕上げ ---------- */
+async function grabFrame(t) {
+  await seek(t);
+  srcT = vid.currentTime;
+  src.width = vid.videoWidth; src.height = vid.videoHeight;
+  src.getContext("2d", { willReadFrequently: true }).drawImage(vid, 0, 0);
+  undoStack.length = 0; $("undo").disabled = true;
+  $("editT").textContent = srcT.toFixed(2) + " 秒";
+}
+function findFace() {
+  if (!classifier) return null;
+  const k = Math.min(1, DET_LONG / Math.max(src.width, src.height));
+  det.width = Math.round(src.width * k); det.height = Math.round(src.height * k);
+  detCtx.drawImage(src, 0, 0, det.width, det.height);
+  const f = detectOn(det);
+  return f && { x: f.x / k, y: f.y / k, w: f.w / k, h: f.h / k };
+}
+function defaultCrop() {
+  const W = src.width, H = src.height;
+  return face ? cropFor(face, W, H) : clampCrop({ cx: W / 2, cy: H / 2, side: Math.min(W, H) * 0.7 }, W, H);
+}
+async function openEditor(t) {
+  await grabFrame(t);
+  face = findFace();
+  crop = defaultCrop();
+  $("stepEdit").hidden = false;
+  syncZoom(); draw();
+  $("stepEdit").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+}
+async function stepFrame(d) {
+  if (undoStack.length) toast("コマを送ったので、消した跡はリセットされました");
+  await grabFrame(srcT + d);
+  draw();
+}
+$("fPrev").onclick = () => stepFrame(-FRAME);
+$("fNext").onclick = () => stepFrame(FRAME);
+$("refit").onclick = () => { face = findFace() || face; crop = defaultCrop(); syncZoom(); draw(); };
+$("back").onclick = () => $("stepPick").scrollIntoView({ block: "start" });
+
+const out = $("out"), octx = out.getContext("2d");
+const BAND = { s: 0.14, m: 0.18, l: 0.22 };
+function draw() {
+  if (!crop) return;
+  const px = Math.round(crop.side), up = OUT / px;
+  $("resNote").textContent = `元の大きさ ${px}px → 800px` + (up > 1.6 ? "（引き伸ばし大・少しぼやけます）" : up > 1 ? "（少し引き伸ばし）" : "");
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(src, crop.cx - crop.side / 2, crop.cy - crop.side / 2, crop.side, crop.side, 0, 0, OUT, OUT);
+  const name = $("name").value.trim();
+  if ($("nameOn").checked && name) {
+    const bh = Math.round(OUT * BAND[sizeKey]);
+    octx.fillStyle = "rgba(0,0,0,0.45)";
+    octx.fillRect(0, OUT - bh, OUT, bh);
+    let fs = Math.round(bh * 0.62);
+    const font = s => `700 ${s}px "Zen Maru Gothic","Hiragino Maru Gothic ProN","BIZ UDPGothic","Yu Gothic",sans-serif`;
+    octx.font = font(fs);
+    while (fs > 20 && octx.measureText(name).width > OUT * 0.9) { fs -= 2; octx.font = font(fs); }
+    octx.fillStyle = "#fff"; octx.textAlign = "center"; octx.textBaseline = "middle";
+    octx.shadowColor = "rgba(0,0,0,0.35)"; octx.shadowBlur = 6;
+    octx.fillText(name, OUT / 2, OUT - bh / 2 + fs * 0.04);
+    octx.shadowBlur = 0; octx.shadowColor = "transparent";
+  }
+  drawBrushOverlay();
+}
+
+/* 大きさスライダー（対数） */
+const minSide = () => Math.max(64, Math.min(src.width, src.height) * 0.12);
+const maxSide = () => Math.min(src.width, src.height);
+function syncZoom() { const a = Math.log(minSide()), b = Math.log(maxSide()); $("zoom").value = Math.round(1000 * (1 - (Math.log(crop.side) - a) / (b - a || 1))); }
+$("zoom").addEventListener("input", () => {
+  const a = Math.log(minSide()), b = Math.log(maxSide());
+  setSide(Math.exp(b - (b - a) * $("zoom").value / 1000));
+});
+function setSide(side) {
+  crop = clampCrop({ ...crop, side: Math.min(maxSide(), Math.max(minSide(), side)) }, src.width, src.height);
+  draw();
+}
+
+/* ドラッグとピンチ（汚れを消すモードでは1本指＝なぞる、2本指＝拡大・移動） */
+const pts = new Map(); let pinch0 = null, mode = "move", stroke = null, hover = null;
+const undoStack = [];
+const toSrc = e => {
+  const r = out.getBoundingClientRect();
+  return { x: crop.cx - crop.side / 2 + (e.clientX - r.left) / r.width * crop.side, y: crop.cy - crop.side / 2 + (e.clientY - r.top) / r.height * crop.side };
+};
+const brushR = () => $("brush").value / 2 * crop.side / OUT;   // 筆の半径（元画像のpx）
+out.addEventListener("pointerdown", e => {
+  if (!crop) return;
+  out.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); pinch0 = null;
+  stroke = mode === "brush" && pts.size === 1 ? { pts: [toSrc(e)], r: brushR() } : null;
+  draw();
+});
+out.addEventListener("pointermove", e => {
+  if (!crop) return;
+  if (mode === "brush") hover = toSrc(e);
+  if (!pts.has(e.pointerId)) { if (mode === "brush") draw(); return; }
+  const prev = pts.get(e.pointerId), cur = { x: e.clientX, y: e.clientY };
+  pts.set(e.pointerId, cur);
+  const scale = crop.side / out.getBoundingClientRect().width;
+  if (pts.size === 1 && stroke) {
+    stroke.pts.push(toSrc(e)); draw();
+  } else if (pts.size === 1) {
+    crop = clampCrop({ ...crop, cx: crop.cx - (cur.x - prev.x) * scale, cy: crop.cy - (cur.y - prev.y) * scale }, src.width, src.height);
+    draw();
+  } else if (pts.size === 2) {
+    const [p, q] = [...pts.values()], d = Math.hypot(p.x - q.x, p.y - q.y);
+    if (pinch0) { setSide(crop.side * pinch0 / d); syncZoom(); }
+    pinch0 = d;
+  }
+});
+["pointerup", "pointercancel"].forEach(t => out.addEventListener(t, e => {
+  const wasStroke = stroke && pts.size === 1 && t === "pointerup";
+  pts.delete(e.pointerId); pinch0 = null;
+  if (wasStroke) inpaintStroke(stroke);
+  stroke = null; draw();
+}));
+out.addEventListener("pointerleave", () => { hover = null; if (mode === "brush") draw(); });
+
+function strokePath(ctx, st, ox, oy, k) {
+  ctx.lineCap = ctx.lineJoin = "round"; ctx.lineWidth = st.r * 2 * k;
+  ctx.beginPath();
+  st.pts.forEach((p, i) => { const x = (p.x - ox) * k, y = (p.y - oy) * k; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  if (st.pts.length === 1) ctx.lineTo((st.pts[0].x - ox) * k + 0.1, (st.pts[0].y - oy) * k);
+  ctx.stroke();
+}
+function drawBrushOverlay() {
+  if (mode !== "brush" || !crop) return;
+  const ox = crop.cx - crop.side / 2, oy = crop.cy - crop.side / 2, k = OUT / crop.side;
+  if (stroke) { octx.strokeStyle = "rgba(255,120,20,0.55)"; strokePath(octx, stroke, ox, oy, k); }
+  if (hover && !stroke) {
+    octx.strokeStyle = "rgba(255,255,255,0.9)"; octx.lineWidth = 2;
+    octx.beginPath(); octx.arc((hover.x - ox) * k, (hover.y - oy) * k, brushR() * k, 0, Math.PI * 2); octx.stroke();
+  }
+}
+/* なぞった所を周りの色で埋める（OpenCV inpaint・Telea 法）。作業は筆跡の周りの四角だけ */
+function inpaintStroke(st) {
+  if (!cv) { toast("消す機能の準備ができていません"); return; }
+  const pad = st.r * 3;
+  const xs = st.pts.map(p => p.x), ys = st.pts.map(p => p.y);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad)), y0 = Math.max(0, Math.floor(Math.min(...ys) - pad));
+  const x1 = Math.min(src.width, Math.ceil(Math.max(...xs) + pad)), y1 = Math.min(src.height, Math.ceil(Math.max(...ys) + pad));
+  const w = x1 - x0, h = y1 - y0;
+  if (w < 2 || h < 2) return;
+  const sctx = src.getContext("2d", { willReadFrequently: true });
+  const before = sctx.getImageData(x0, y0, w, h);
+  const mc = document.createElement("canvas"); mc.width = w; mc.height = h;
+  const mctx = mc.getContext("2d"); mctx.fillStyle = "#000"; mctx.fillRect(0, 0, w, h);
+  mctx.strokeStyle = "#fff"; strokePath(mctx, st, x0, y0, 1);
+  const rgba = cv.matFromImageData(before), rgb = new cv.Mat(), dst = new cv.Mat(), m4 = cv.imread(mc), mask = new cv.Mat(), outRgba = new cv.Mat();
+  cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(m4, mask, cv.COLOR_RGBA2GRAY);
+  cv.threshold(mask, mask, 127, 255, cv.THRESH_BINARY);
+  cv.inpaint(rgb, mask, dst, Math.max(3, Math.min(12, st.r * 0.4)), cv.INPAINT_TELEA);
+  cv.cvtColor(dst, outRgba, cv.COLOR_RGB2RGBA);
+  sctx.putImageData(new ImageData(new Uint8ClampedArray(outRgba.data), w, h), x0, y0);
+  [rgba, rgb, dst, m4, mask, outRgba].forEach(x => x.delete());
+  undoStack.push({ x: x0, y: y0, data: before });
+  if (undoStack.length > 20) undoStack.shift();
+  $("undo").disabled = false;
+}
+$("undo").onclick = () => {
+  const u = undoStack.pop(); if (!u) return;
+  src.getContext("2d").putImageData(u.data, u.x, u.y);
+  $("undo").disabled = !undoStack.length; draw();
+};
+$("mode").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  mode = b.dataset.v; $("mode").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  $("brushBox").hidden = mode !== "brush";
+  $("stage").classList.toggle("brush", mode === "brush");
+  $("hint").textContent = mode === "brush" ? "シミより太めになぞる・2本指で拡大" : "ドラッグで移動・ピンチで拡大";
+  draw();
+});
+$("brush").addEventListener("input", draw);
+out.addEventListener("wheel", e => { e.preventDefault(); setSide(crop.side * Math.exp(e.deltaY * 0.0015)); syncZoom(); }, { passive: false });
+
+/* 名前 */
+function loadRecent() { try { return JSON.parse(localStorage.getItem("neko.recent") || "[]"); } catch { return []; } }
+function saveRecent(n) { const r = [n, ...loadRecent().filter(x => x !== n)].slice(0, 8); try { localStorage.setItem("neko.recent", JSON.stringify(r)); } catch {} renderRecent(); }
+function renderRecent() {
+  const box = $("recent"); box.innerHTML = "";
+  for (const n of loadRecent()) { const b = document.createElement("button"); b.textContent = n; b.onclick = () => { $("name").value = n; draw(); }; box.appendChild(b); }
+}
+renderRecent();
+$("nameOn").addEventListener("change", () => { $("nameBox").hidden = !$("nameOn").checked; draw(); if ($("nameOn").checked) $("name").focus(); });
+$("name").addEventListener("input", draw);
+$("size").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  sizeKey = b.dataset.v; $("size").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); draw();
+});
+if (document.fonts) document.fonts.load('700 80px "Zen Maru Gothic"', "猫ねこネコマーマレード").then(draw).catch(() => {});
+
+/* 保存 */
+function toast(text) { const t = document.createElement("div"); t.className = "toast"; t.textContent = text; document.body.appendChild(t); setTimeout(() => t.remove(), 2200); }
+$("save").onclick = async () => {
+  const keep = mode; mode = "move"; draw();   // 筆のカーソルを写さない
+  const name = $("nameOn").checked ? $("name").value.trim() : "";
+  if (name) saveRecent(name);
+  const safe = s => s.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 40);
+  const filename = `${safe(name || "neko")}_${safe(videoName)}_${srcT.toFixed(2)}s.jpg`;
+  const blob = await new Promise(r => out.toBlob(r, "image/jpeg", 0.9));
+  mode = keep; draw();
+  try {
+    if (downloads) await downloads.save({ filename, data: blob });
+    else {
+      const file = new File([blob], filename, { type: "image/jpeg" });
+      if (/Android|iPhone|iPad/i.test(navigator.userAgent) && navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
+      else { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
+    }
+    savedCount++; $("savedN").textContent = savedCount; toast("保存しました：" + filename);
+  } catch (e) {
+    if (e && (e.code === "declined" || e.name === "AbortError")) return;
+    toast("保存できませんでした" + (e && e.message ? "：" + e.message : ""));
+  }
+};
+</script>
+
+</html>
